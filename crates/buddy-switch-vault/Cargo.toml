@@ -1,0 +1,18 @@
+[package]
+name = "buddy-switch-vault"
+version = "20261031.0.0"
+edition = "2021"
+description = "SQLCipher 解密通道（仅本 crate 编 SQLCipher；其余 crate 继续用标准 SQLite，避免全仓换 feature）"
+
+[dependencies]
+# ★ 只有这里开 SQLCipher。core 的 `rusqlite` 仍是 `bundled`（标准 SQLite）——
+#   feature 是编译期开关，共用一个 crate 会让**所有** sqlite 使用点跟着重编 OpenSSL。
+#
+# ⚠️ 本地构建调整（非上游）：原 feature 是 `bundled-sqlcipher-vendored-openssl`，
+#   它会强制 openssl-src 从源码编译 OpenSSL。本机是 windows-gnu 工具链，OpenSSL 的
+#   Configure 在 MSVC 之外的平台要求 msys 风格的 perl，而沙箱里 msys perl 无法创建
+#   共享内存对象（NtCreateDirectoryObject 0xC0000022），源码编译必然失败。
+#   改成 `bundled-sqlcipher`：SQLCipher 仍随包编译，但 OpenSSL 改用
+#   OPENSSL_DIR 指向的预编译库（MSYS2 mingw-w64-x86_64-openssl 3.6.5）。
+#   加密能力不变，只是 OpenSSL 来源从源码换成了预编译。
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }

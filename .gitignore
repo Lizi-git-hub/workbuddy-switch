@@ -1,0 +1,82 @@
+# ---- 日志 ----
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ---- 前端构建产物 ----
+node_modules
+dist
+dist-*
+dist-ssr
+*.local
+.vite/
+coverage/
+*.tsbuildinfo
+
+# ---- Rust / Tauri 构建产物（workspace target）----
+target/
+src-tauri/target/
+
+# npm 包 postinstall 下载的平台二进制
+npm/bin/buddy-switch-*
+npm/platform/*/bin/
+
+# ---- 本地运行时数据（账号、备份等不入库）----
+accounts.json
+backups/
+
+# ---- 环境变量与密钥 ----
+.env
+.env.*
+!.env.example
+.key
+
+# ---- 编辑器 / AI 工具本地配置 ----
+.idea
+.vscode
+.trae
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.codebuddy/
+.cursor/
+.agents/
+.codex/
+.grok/
+.claude/
+/.workbuddy/
+/.workbuddy-ai/
+.omc/
+.claude-flow/
+.trellis/
+.codegraph/
+
+# ---- 临时调试 / 探针产物（git add -A 前先看这里）----
+.qa-logs/
+.qa-tmp/
+.debug-tmp/
+.playwright-mcp/
+.tmp-*
+.tmp/
+.tmp-pcli/
+docs/images/.probe/
+_*.txt
+_*.py
+_*.png
+_*.mjs
+_*.cjs
+.verify-*.txt
+
+# ---- 其它 ----
+reference/
+deliverables/
+release-notes.md

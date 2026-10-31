@@ -1,0 +1,33 @@
+{
+  "name": "@lizi-git-hub/buddy-switch",
+  "version": "20261031.0.0",
+  "description": "Buddy Switch（WorkBuddy 账号切换工具）：本地 webui（浏览器操作）+ 桌面 App（安装后运行 buddy-switch）",
+  "bin": {
+    "buddy-switch": "bin/buddy-switch.js"
+  },
+  "files": [
+    "bin/buddy-switch.js",
+    "scripts"
+  ],
+  "optionalDependencies": {
+    "@lizi-git-hub/buddy-switch-darwin-arm64": "20261031.0.0",
+    "@lizi-git-hub/buddy-switch-darwin-x64": "20261031.0.0",
+    "@lizi-git-hub/buddy-switch-win32-x64": "20261031.0.0",
+    "@lizi-git-hub/buddy-switch-linux-x64": "20261031.0.0",
+    "@lizi-git-hub/buddy-switch-linux-arm64": "20261031.0.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "workbuddy",
+    "codebuddy",
+    "account",
+    "switch",
+    "cli"
+  ],
+  "license": "PolyForm-Noncommercial-1.0.0"
+}

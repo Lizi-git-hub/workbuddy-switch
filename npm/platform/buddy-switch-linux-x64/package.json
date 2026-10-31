@@ -1,0 +1,15 @@
+{
+  "name": "@lizi-git-hub/buddy-switch-linux-x64",
+  "version": "20261031.0.0",
+  "description": "Buddy Switch platform binary (linux-x64)",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ],
+  "license": "PolyForm-Noncommercial-1.0.0"
+}

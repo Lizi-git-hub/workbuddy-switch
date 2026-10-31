@@ -1,0 +1,1372 @@
+//! WorkBuddy 积分资源查询。
+//!
+//! WorkBuddy 套餐页使用 summary/paid/free 三个资源接口；旧的
+//! `POST /v2/billing/meter/get-user-resource` 仍作为兼容回退。
+//! 这里仅返回脱敏后的资源摘要，不把 token 或完整响应交给前端。
+
+use chrono::{Local, NaiveDate, NaiveDateTime};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+
+use crate::modules::account::{account_display_name, build_auth_headers, envelope_token_error};
+use crate::modules::config::{http_request, load_checkin_config, now_ms, WORKBUDDY_API_ENDPOINT};
+use crate::modules::credit_usage;
+use crate::modules::refresh::{ensure_fresh_token_for, refresh_account_token_for};
+use crate::modules::region::{region_spec, Region};
+
+const USER_RESOURCE_PATH: &str = "/v2/billing/meter/get-user-resource";
+const WORKBUDDY_WEB_ENDPOINT: &str = "https://www.workbuddy.cn";
+const RESOURCE_SUMMARY_PATH: &str = "/billing/meter/get-user-resource-summary";
+const RESOURCE_PAID_PACKAGES_PATH: &str = "/billing/meter/get-user-resource-paid-packages";
+const RESOURCE_FREE_PACKAGES_PATH: &str = "/billing/meter/get-user-resource-free-packages";
+const PRODUCT_CODE: &str = "p_tcaca";
+const EXPIRING_SOON_DAYS: i64 = 7;
+
+// WorkBuddy CN UserCenter 的商品码（来自其公开套餐配置）。解析器不会依赖
+// 这些常量，因此上游新增商品时仍可通过 summary/明细返回资源。
+const PAID_PACKAGE_CODES: &[&str] = &[
+    "TCACA_code_002_AkiJS3ZHF5",
+    "TCACA_code_023_4xbGhMrE6q",
+    "TCACA_code_026_BaESVICNoi",
+    "TCACA_code_027_0FCGVA6vSa",
+    "TCACA_code_009_0XmEQc2xOf",
+    "TCACA_code_038_OhvqZtiPKr",
+];
+const FREE_PACKAGE_CODES: &[&str] = &[
+    "TCACA_code_008_cfWoLwvjU4",
+    "TCACA_code_007_nzdH5h4Nl0",
+    "TCACA_code_028_NtpWi0jzXs",
+    "TCACA_code_029_6wCGEWquYy",
+    "TCACA_code_030_BjSt89qTvr",
+];
+
+fn first_value<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| value.get(*key))
+}
+
+fn parse_number(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Number(number)) => number.as_f64(),
+        Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn first_number(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| parse_number(value.get(*key)))
+}
+
+/// 腾讯 billing 接口返回的**墙钟**时区：固定 UTC+8，**与运行机器的时区无关**。
+///
+/// 依据：上游参照实现用 `time.ParseInLocation(layout, s, UTC+8)` 解析套餐到期时间；
+/// 管理端实现（`ithtelab/workbuddy-manager`）在注释里同样明确记录
+/// 「腾讯给的是 UTC+8 墙钟，与容器时区无关 —— 必须显式带 +08:00 解析」，
+/// 并指出按本机时区解析会让到期时刻整体偏移数小时、倒计时跟着错。
+const CN_WALLCLOCK_UTC_OFFSET_SECONDS: i64 = 8 * 3600;
+
+/// 把腾讯返回的「UTC+8 墙钟」无时区时间转成绝对毫秒时间戳。
+///
+/// 做法：先按 UTC 解释拿到中间值，再减去 8 小时偏移 —— 等价于把它当作 `+08:00`
+/// 时刻解析，但**不受本机时区影响**。
+///
+/// 相对 `Local.from_local_datetime` 另有一个好处：固定偏移没有夏令时跳变，
+/// 不会出现「DST 缺口那一小时解析出 `None`」的静默丢失。
+fn cn_wallclock_to_epoch_ms(naive: NaiveDateTime) -> i64 {
+    naive.and_utc().timestamp_millis() - CN_WALLCLOCK_UTC_OFFSET_SECONDS * 1000
+}
+
+fn parse_timestamp_ms(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(number) = parse_number(Some(value)) {
+        let millis = if number.abs() < 10_000_000_000.0 {
+            number * 1000.0
+        } else {
+            number
+        };
+        return Some(millis.round() as i64);
+    }
+
+    let text = value.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    // 带显式时区的形态原样采信（它自带偏移，与本机时区无关）。
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some(parsed.timestamp_millis());
+    }
+    // 以下三种都**不带时区**，按腾讯的 UTC+8 墙钟解释，见上方常量说明。
+    if let Ok(parsed) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S") {
+        return Some(cn_wallclock_to_epoch_ms(parsed));
+    }
+    if let Ok(parsed) = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f") {
+        return Some(cn_wallclock_to_epoch_ms(parsed));
+    }
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(23, 59, 59))
+        .map(cn_wallclock_to_epoch_ms)
+}
+
+fn earliest_timestamp_ms(raw: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .filter_map(|key| parse_timestamp_ms(raw.get(*key)))
+        .min()
+}
+
+fn value_at_path<'a>(mut current: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn resource_accounts(response: &Value) -> Vec<&Value> {
+    let paths: &[&[&str]] = &[
+        &["data", "Accounts"],
+        &["data", "data", "Accounts"],
+        &["data", "Response", "Data", "Accounts"],
+        &["data", "data", "Response", "Data", "Accounts"],
+        &["data", "accounts"],
+        &["data", "data", "accounts"],
+    ];
+
+    for path in paths {
+        if let Some(items) = value_at_path(response, path).and_then(Value::as_array) {
+            return items.iter().collect();
+        }
+    }
+    Vec::new()
+}
+
+fn resource_packages(response: &Value) -> Vec<&Value> {
+    let paths: &[&[&str]] = &[
+        &["data", "Packages"],
+        &["data", "data", "Packages"],
+        &["data", "Response", "Data", "Packages"],
+        &["data", "data", "Response", "Data", "Packages"],
+        &["data", "packages"],
+        &["data", "data", "packages"],
+    ];
+
+    for path in paths {
+        if let Some(items) = value_at_path(response, path).and_then(Value::as_array) {
+            return items.iter().collect();
+        }
+    }
+    Vec::new()
+}
+
+fn has_resource_accounts(response: &Value) -> bool {
+    let paths: &[&[&str]] = &[
+        &["data", "Accounts"],
+        &["data", "data", "Accounts"],
+        &["data", "Response", "Data", "Accounts"],
+        &["data", "data", "Response", "Data", "Accounts"],
+        &["data", "accounts"],
+        &["data", "data", "accounts"],
+    ];
+    paths.iter().any(|path| {
+        value_at_path(response, path)
+            .and_then(Value::as_array)
+            .is_some()
+    })
+}
+
+fn has_resource_packages(response: &Value) -> bool {
+    let paths: &[&[&str]] = &[
+        &["data", "Packages"],
+        &["data", "data", "Packages"],
+        &["data", "Response", "Data", "Packages"],
+        &["data", "data", "Response", "Data", "Packages"],
+        &["data", "packages"],
+        &["data", "data", "packages"],
+    ];
+    paths.iter().any(|path| {
+        value_at_path(response, path)
+            .and_then(Value::as_array)
+            .is_some()
+    })
+}
+
+fn resource_summary(raw: &Value, now: i64) -> Value {
+    let slice = first_value(raw, &["SlicePeriodUsageDetails", "slicePeriodUsageDetails"])
+        .and_then(Value::as_array)
+        .and_then(|items| items.first());
+    let total_keys = [
+        "CycleCapacitySizePrecise",
+        "CycleCapacitySize",
+        "CycleTotalCapacity",
+        "CapacitySizePrecise",
+        "CapacitySize",
+        "SlicePeriodCapacitySizePrecise",
+        "SlicePeriodCapacitySize",
+    ];
+    let remaining_keys = [
+        "CycleCapacityRemainPrecise",
+        "CycleCapacityRemain",
+        "CycleRemainCapacity",
+        "CapacityRemainPrecise",
+        "CapacityRemain",
+        "SlicePeriodCapacityRemainPrecise",
+        "SlicePeriodCapacityRemain",
+    ];
+    let used_keys = [
+        "CycleCapacityUsedPrecise",
+        "CycleCapacityUsed",
+        "CycleUsedCapacity",
+        "CapacityUsedPrecise",
+        "CapacityUsed",
+        "SlicePeriodCapacityUsedPrecise",
+        "SlicePeriodCapacityUsed",
+    ];
+    let raw_total = first_number(raw, &total_keys)
+        .or_else(|| slice.and_then(|value| first_number(value, &total_keys)));
+    let raw_remaining = first_number(raw, &remaining_keys)
+        .or_else(|| slice.and_then(|value| first_number(value, &remaining_keys)));
+    let raw_used = first_number(raw, &used_keys)
+        .or_else(|| slice.and_then(|value| first_number(value, &used_keys)));
+    let total = raw_total
+        .or_else(|| {
+            raw_remaining
+                .zip(raw_used)
+                .map(|(remaining, used)| remaining + used)
+        })
+        .or(raw_remaining)
+        .or(raw_used)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let remaining = raw_remaining
+        .unwrap_or_else(|| (total - raw_used.unwrap_or(0.0)).max(0.0))
+        .max(0.0);
+    let used = raw_used
+        .unwrap_or_else(|| (total - remaining).max(0.0))
+        .max(0.0);
+    let expire_at = earliest_timestamp_ms(
+        raw,
+        &[
+            "DeductionEndTime",
+            "deductionEndTime",
+            "ExpiredTime",
+            "expiredTime",
+            "CycleEndTime",
+            "cycleEndTime",
+        ],
+    );
+    let expired = expire_at.map(|value| value <= now).unwrap_or(false);
+    let expiring_soon = expire_at
+        .map(|value| value > now && value - now <= EXPIRING_SOON_DAYS * 24 * 3600 * 1000)
+        .unwrap_or(false);
+    let status = first_value(raw, &["Status", "status"])
+        .and_then(|value| parse_number(Some(value)))
+        .map(|value| value as i64);
+
+    json!({
+        "packageCode": first_value(raw, &["PackageCode", "packageCode"]),
+        "packageName": first_value(raw, &["PackageName", "packageName"]),
+        "total": total,
+        "remaining": remaining,
+        "used": used,
+        "status": status,
+        "expireAt": expire_at,
+        "expired": expired,
+        "expiringSoon": expiring_soon,
+    })
+}
+
+fn response_error(response: &Value) -> String {
+    let nested = response.get("data").filter(|value| value.is_object());
+    let code = response_code(response).unwrap_or(-1);
+    response
+        .get("message")
+        .or_else(|| response.get("msg"))
+        .or_else(|| nested.and_then(|value| value.get("message")))
+        .or_else(|| nested.and_then(|value| value.get("msg")))
+        .and_then(|value| value.as_str())
+        .filter(|message| !message.trim().is_empty())
+        .map(|message| message.chars().take(160).collect::<String>())
+        .unwrap_or_else(|| format!("积分查询失败（code={code}）"))
+}
+
+fn response_code(response: &Value) -> Option<i64> {
+    fn parse_code(value: &Value) -> Option<i64> {
+        value.as_i64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<i64>().ok())
+        })
+    }
+    response
+        .get("code")
+        .and_then(parse_code)
+        .or_else(|| response.get("data")?.get("code").and_then(parse_code))
+}
+
+fn is_success(response: &Value) -> bool {
+    if !response.is_object() {
+        return false;
+    }
+    match response_code(response) {
+        Some(0) | Some(200) => true,
+        Some(_) => false,
+        None => {
+            response.get("data").is_some()
+                && response.get("ok").and_then(Value::as_bool) != Some(false)
+                && response.get("success").and_then(Value::as_bool) != Some(false)
+        }
+    }
+}
+
+fn is_unauthorized(response: &Value) -> bool {
+    let code = response_code(response).unwrap_or(-1);
+    // 网关 WAF 10085 是客户端指纹拦截，不是 token 过期；刷新无效。
+    if code == 10085 {
+        return false;
+    }
+    if code == 401 || code == 403 {
+        return true;
+    }
+    let message = response
+        .get("message")
+        .or_else(|| response.get("msg"))
+        .or_else(|| response.get("data").and_then(|value| value.get("message")))
+        .or_else(|| response.get("data").and_then(|value| value.get("msg")))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    ["unauthorized", "401", "登录", "失效", "过期", "token"]
+        .iter()
+        .any(|keyword| message.contains(keyword))
+}
+
+fn is_transport_error(response: &Value) -> bool {
+    response_code(response) == Some(-1)
+        && response
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty())
+}
+
+/// 发起需要账号身份的 JSON POST 请求（CN 薄包装）。
+///
+/// ⚠️ **跨 region 场景禁止使用本函数**，一律用 [`authenticated_post_for`]。
+///
+/// 本函数写死 `Region::Cn`，而这条链路在 token 陈旧时会
+/// **刷新账号并把结果写回该 region 的账号库**（`upsert_account_for`）。
+/// 拿它处理 global 账号的后果不是"请求打错域"这么轻，而是
+/// **global 账号被写进 `accounts.json`（CN 账号库）** ——
+/// `official_usage` 模块就这么踩过一次（Global 统计视图串出 global 账号，
+/// 违反 PRD G1「两版互不污染」）。生产代码已无调用点，保留仅为 CN 语义入口。
+pub async fn authenticated_post(account: &Value, url: &str, body: Value) -> Value {
+    authenticated_post_for(Region::Cn, account, url, body).await
+}
+
+/// 按 region 发起需要账号身份的 JSON POST 请求。
+///
+/// 资源查询和官方用量查询必须共用这条链路：先按现有惰性策略保证 token
+/// 新鲜，遇到未授权时使用 refresh token 重试一次。调用方只拿到上游 JSON，
+/// 不会把认证字段拼进返回值。
+pub async fn authenticated_post_for(
+    region: Region,
+    account: &Value,
+    url: &str,
+    body: Value,
+) -> Value {
+    // 加密信封凭据短路：不发空 Bearer，也不进入刷新重试链路（上游 PR #95 的同款处理）。
+    // 放在 `ensure_fresh_token_for` **之前**：信封 `refresh_token` 本来就刷不动
+    // （`as_str()` 取不到值 ⇒ 刷新链路会自己报「需重新登录」），先拦住能省一次无谓请求。
+    if let Some(err) = envelope_token_error(account) {
+        return json!({"code": -2, "message": err});
+    }
+    let config = load_checkin_config();
+    let mut working_account = ensure_fresh_token_for(region, account.clone(), &config).await;
+    let mut response = post_with_account(&working_account, url, body.clone()).await;
+
+    if is_unauthorized(&response)
+        && !working_account
+            .get("refresh_token")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .is_empty()
+    {
+        working_account = refresh_account_token_for(region, working_account).await;
+        response = post_with_account(&working_account, url, body).await;
+    }
+
+    response
+}
+
+async fn post_with_account(account: &Value, url: &str, body: Value) -> Value {
+    let headers = resource_auth_headers(account, request_origin(url));
+    let response = http_request(url, "POST", Some(body.clone()), Some(&headers)).await;
+    if is_transport_error(&response) {
+        http_request(url, "POST", Some(body), Some(&headers)).await
+    } else {
+        response
+    }
+}
+
+fn request_origin(url: &str) -> &'static str {
+    if url.starts_with(WORKBUDDY_WEB_ENDPOINT) {
+        WORKBUDDY_WEB_ENDPOINT
+    } else {
+        WORKBUDDY_API_ENDPOINT
+    }
+}
+
+fn resource_auth_headers(
+    account: &Value,
+    origin: &str,
+) -> std::collections::HashMap<String, String> {
+    let mut headers = build_auth_headers(account);
+    // WorkBuddy 用户中心的 Axios 拦截器始终携带该头。桌面端使用同一组
+    // billing 接口时也保持一致，避免网关把请求当成未知客户端。
+    headers.insert("X-Client-Platform".to_string(), "web".to_string());
+    headers.insert(
+        "Accept".to_string(),
+        "application/json, text/plain, */*".to_string(),
+    );
+    headers.insert("Origin".to_string(), origin.to_string());
+    headers.insert(
+        "Referer".to_string(),
+        format!("{origin}/profile/plans-usage"),
+    );
+    headers
+}
+
+fn paid_packages_body() -> Value {
+    json!({
+        "PageNumber": 1,
+        "PageSize": 200,
+        "Status": [0, 3],
+        "PackageCodes": PAID_PACKAGE_CODES,
+        "NeedRenewInfo": true,
+    })
+}
+
+fn free_packages_body() -> Value {
+    let now = Local::now();
+    let start = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap_or(now.naive_local());
+    let end = now
+        .date_naive()
+        .and_hms_opt(23, 59, 59)
+        .unwrap_or(now.naive_local());
+    json!({
+        "PageNumber": 1,
+        "PageSize": 200,
+        "Status": [0, 3],
+        "SlicePeriodStartTime": start.format("%Y-%m-%d %H:%M:%S").to_string(),
+        "SlicePeriodEndTime": end.format("%Y-%m-%d %H:%M:%S").to_string(),
+        "PackageCodes": FREE_PACKAGE_CODES,
+    })
+}
+
+fn new_resource_endpoint(account: &Value) -> &'static str {
+    // 官网脚本使用相对路径，实际请求的是当前登录 origin。账号库中的 CN
+    // OAuth token 默认签发给 www.codebuddy.cn；若把它固定发往
+    // www.workbuddy.cn，令牌域和 X-Domain 会不一致并被网关拒绝。
+    // 这里只在两个已知官方 origin 间选择，不允许账号数据拼出任意主机。
+    match account
+        .get("domain")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("workbuddy.cn") | Some("www.workbuddy.cn") => WORKBUDDY_WEB_ENDPOINT,
+        _ => WORKBUDDY_API_ENDPOINT,
+    }
+}
+
+/// 按 region 选择资源查询 origin。
+///
+/// CN 复用既有域判定逻辑（保证零变化）；Global 使用该 region 的 billing 基址。
+fn new_resource_endpoint_for(region: Region, account: &Value) -> &'static str {
+    match region {
+        Region::Cn => new_resource_endpoint(account),
+        Region::Global => region_spec(region).billing_base,
+    }
+}
+
+/// CN 资源 URL 拼接（旧签名，仅供单测使用）。
+#[cfg(test)]
+fn new_resource_url(account: &Value, path: &str) -> String {
+    format!("{}{path}", new_resource_endpoint(account))
+}
+
+/// 按 region 拼资源 URL。
+fn new_resource_url_for(region: Region, account: &Value, path: &str) -> String {
+    format!("{}{path}", new_resource_endpoint_for(region, account))
+}
+
+struct NewResourceResponses {
+    account: Value,
+    summary: Value,
+    paid: Value,
+    free: Value,
+    refresh_attempted: bool,
+}
+
+async fn retry_new_response_if_unauthorized(
+    account: &Value,
+    response: Value,
+    url: &str,
+    body: Value,
+) -> Value {
+    if is_unauthorized(&response) {
+        post_with_account(account, url, body).await
+    } else {
+        response
+    }
+}
+
+/// 统一惰性刷新后并行请求三类新资源接口；若任一路返回未授权，只刷新一次，
+/// 然后仅重试该分支，避免三个 future 同时刷新并覆盖账号库中的 token。
+async fn fetch_new_resource_responses(region: Region, account: &Value) -> NewResourceResponses {
+    let config = load_checkin_config();
+    let working_account = ensure_fresh_token_for(region, account.clone(), &config).await;
+    let summary_url = new_resource_url_for(region, &working_account, RESOURCE_SUMMARY_PATH);
+    let paid_url = new_resource_url_for(region, &working_account, RESOURCE_PAID_PACKAGES_PATH);
+    let free_url = new_resource_url_for(region, &working_account, RESOURCE_FREE_PACKAGES_PATH);
+    let summary_body = json!({});
+    let paid_body = paid_packages_body();
+    let free_body = free_packages_body();
+    let (summary, paid, free) = tokio::join!(
+        post_with_account(&working_account, &summary_url, summary_body.clone()),
+        post_with_account(&working_account, &paid_url, paid_body.clone()),
+        post_with_account(&working_account, &free_url, free_body.clone()),
+    );
+
+    if !(is_unauthorized(&summary) || is_unauthorized(&paid) || is_unauthorized(&free)) {
+        return NewResourceResponses {
+            account: working_account,
+            summary,
+            paid,
+            free,
+            refresh_attempted: false,
+        };
+    }
+
+    let can_refresh = working_account
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .is_some_and(|token| !token.trim().is_empty());
+    if !can_refresh {
+        return NewResourceResponses {
+            account: working_account,
+            summary,
+            paid,
+            free,
+            refresh_attempted: false,
+        };
+    }
+    let refreshed = refresh_account_token_for(region, working_account).await;
+    let (summary, paid, free) = tokio::join!(
+        retry_new_response_if_unauthorized(&refreshed, summary, &summary_url, summary_body),
+        retry_new_response_if_unauthorized(&refreshed, paid, &paid_url, paid_body),
+        retry_new_response_if_unauthorized(&refreshed, free, &free_url, free_body),
+    );
+    NewResourceResponses {
+        account: refreshed,
+        summary,
+        paid,
+        free,
+        refresh_attempted: true,
+    }
+}
+
+async fn fetch_legacy_user_resource_for(region: Region, account: &Value) -> Value {
+    let now = Local::now();
+    let begin = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let end = (now + chrono::Duration::days(365 * 101))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let body = json!({
+        "PageNumber": 1,
+        "PageSize": 100,
+        "ProductCode": PRODUCT_CODE,
+        "Status": [0, 3],
+        "PackageEndTimeRangeBegin": begin,
+        "PackageEndTimeRangeEnd": end,
+    });
+    let url = format!("{}{USER_RESOURCE_PATH}", region_spec(region).billing_base);
+    // 新接口编排已经统一执行过惰性刷新，并在任一路未授权时只刷新一次。
+    // 旧接口回退必须直接复用该账号，不能重新进入 authenticated_post，
+    // 否则可能重复刷新并用旧 refresh token 覆盖刚落盘的新 token。
+    post_with_account(account, &url, body).await
+}
+
+fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {
+    let detail_codes: HashSet<String> = detail_resources
+        .iter()
+        .filter_map(|resource| {
+            first_value(resource, &["packageCode", "PackageCode"])
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let mut resources = detail_resources;
+    resources.extend(summary_resources.into_iter().filter(|resource| {
+        first_value(resource, &["packageCode", "PackageCode"])
+            .and_then(Value::as_str)
+            .map(|code| !detail_codes.contains(code))
+            .unwrap_or(true)
+    }));
+    resources
+}
+
+fn normalized_new_resources(
+    summary_response: &Value,
+    paid_response: &Value,
+    free_response: &Value,
+    now: i64,
+) -> Option<Vec<Value>> {
+    let summary_ok = is_success(summary_response) && has_resource_packages(summary_response);
+    let paid_ok = is_success(paid_response) && has_resource_accounts(paid_response);
+    let free_ok = is_success(free_response) && has_resource_accounts(free_response);
+    if !(summary_ok || paid_ok || free_ok) {
+        return None;
+    }
+
+    let summary_resources = if summary_ok {
+        resource_packages(summary_response)
+            .into_iter()
+            .map(|resource| resource_summary(resource, now))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut detail_resources = Vec::new();
+    if paid_ok {
+        detail_resources.extend(
+            resource_accounts(paid_response)
+                .into_iter()
+                .map(|resource| resource_summary(resource, now)),
+        );
+    }
+    if free_ok {
+        detail_resources.extend(
+            resource_accounts(free_response)
+                .into_iter()
+                .map(|resource| resource_summary(resource, now)),
+        );
+    }
+    Some(merge_resources(summary_resources, detail_resources))
+}
+
+fn credit_result(account: &Value, resources: Vec<Value>, now: i64) -> Value {
+    let total_remaining: f64 = resources
+        .iter()
+        .filter_map(|resource| resource.get("remaining").and_then(|value| value.as_f64()))
+        .sum();
+    let total_capacity: f64 = resources
+        .iter()
+        .filter_map(|resource| resource.get("total").and_then(|value| value.as_f64()))
+        .sum();
+    let soonest_expire_at = resources
+        .iter()
+        .filter(|resource| {
+            resource
+                .get("remaining")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0)
+                > 0.0
+        })
+        .filter_map(|resource| resource.get("expireAt").and_then(|value| value.as_i64()))
+        .min();
+    let expiring_soon = resources.iter().any(|resource| {
+        resource
+            .get("expiringSoon")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+            && resource
+                .get("remaining")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0)
+                > 0.0
+    });
+    let expired = resources.iter().any(|resource| {
+        resource.get("expired").and_then(|value| value.as_bool()) == Some(true)
+            && resource
+                .get("remaining")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0)
+                > 0.0
+    });
+    let expiring_soon_remaining: f64 = resources
+        .iter()
+        .filter(|resource| {
+            resource
+                .get("expiringSoon")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+        })
+        .filter_map(|resource| resource.get("remaining").and_then(|value| value.as_f64()))
+        .sum();
+    let expired_remaining: f64 = resources
+        .iter()
+        .filter(|resource| resource.get("expired").and_then(|value| value.as_bool()) == Some(true))
+        .filter_map(|resource| resource.get("remaining").and_then(|value| value.as_f64()))
+        .sum();
+    let account_id = account.get("id").cloned().unwrap_or(Value::Null);
+    let account_name = account_display_name(account);
+    if let Some(account_id) = account_id.as_str() {
+        let _ = credit_usage::record_snapshot(
+            account_id,
+            &account_name,
+            total_capacity,
+            total_remaining,
+        );
+    }
+
+    json!({
+        "ok": true,
+        "accountId": account_id,
+        "accountName": account_name,
+        "updatedAt": now,
+        "totalCapacity": total_capacity,
+        "totalRemaining": total_remaining,
+        "expiringSoonRemaining": expiring_soon_remaining,
+        "expiredRemaining": expired_remaining,
+        "soonestExpireAt": soonest_expire_at,
+        "expiringSoon": expiring_soon,
+        "expired": expired,
+        "resources": resources,
+    })
+}
+
+/// 查询单账号的积分资源及到期时间（CN）。
+pub async fn get_credit_expiry(account: &Value) -> Value {
+    get_credit_expiry_for(Region::Cn, account).await
+}
+
+/// 失败结果的**机器可读**原因：凭据是客户端 5.6 的加密信封（我方解不开）。
+///
+/// 前端拿它决定要不要在错误旁边挂「用 OAuth 扫码添加」按钮。
+/// ⚠️ 这不是给用户看的文案 —— 展示文案是同一个结果里的 `error` 字段；
+/// 它是**契约常量**，改值必须同步前端（`src/lib/types.ts` 的 `CreditExpiry.reason`
+/// 与两处 `=== "encrypted_credential"` 比较）。
+pub const ENCRYPTED_CREDENTIAL_REASON: &str = "encrypted_credential";
+
+/// 按 region 查询单账号的积分资源及到期时间。
+pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
+    if let Some(err) = envelope_token_error(account) {
+        return json!({
+            "ok": false,
+            "accountId": account.get("id").cloned().unwrap_or(Value::Null),
+            "accountName": account_display_name(account),
+            "error": err,
+            // ★ 机器可读的失败原因：前端要在 `credit.error` 旁边挂「用 OAuth 扫码添加」
+            // 这个出口按钮，判据**不能**去解析上面那句中文文案（文案一改，按钮静默消失）。
+            // 常量由 [`ENCRYPTED_CREDENTIAL_REASON`] 给出，改值时两边一起改。
+            "reason": ENCRYPTED_CREDENTIAL_REASON,
+        });
+    }
+
+    let account_id = account.get("id").cloned().unwrap_or(Value::Null);
+    let now = now_ms();
+    let responses = fetch_new_resource_responses(region, account).await;
+    if let Some(resources) =
+        normalized_new_resources(&responses.summary, &responses.paid, &responses.free, now)
+    {
+        return credit_result(account, resources, now);
+    }
+
+    // 旧接口回退必须复用三路请求已刷新过的账号，避免再次拿原始 refresh token
+    // 发起第二次刷新并把刚落盘的新 token 覆盖成失效状态。
+    let mut fallback_account = responses.account;
+    let mut response = fetch_legacy_user_resource_for(region, &fallback_account).await;
+    if is_unauthorized(&response)
+        && !responses.refresh_attempted
+        && !fallback_account
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+    {
+        // 新接口没有触发过 401 刷新时，仍保留旧接口原有的一次重试能力；
+        // 若新接口已刷新过，则禁止这里再次刷新，保证一次查询最多一次 401 refresh。
+        fallback_account = refresh_account_token_for(region, fallback_account).await;
+        response = fetch_legacy_user_resource_for(region, &fallback_account).await;
+    }
+    if is_success(&response) && has_resource_accounts(&response) {
+        let resources = resource_accounts(&response)
+            .into_iter()
+            .map(|resource| resource_summary(resource, now))
+            .collect();
+        return credit_result(account, resources, now);
+    }
+    json!({
+        "ok": false,
+        "accountId": account_id,
+        "accountName": account_display_name(account),
+        "error": response_error(&response),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归上游 issue #94：信封凭据在 `authenticated_post_for` **入口**短路，
+    /// 不发空 `Bearer`，也不进入刷新重试链路。
+    ///
+    /// 可证伪：删掉 `authenticated_post_for` 开头那段短路，本用例会进入
+    /// `ensure_fresh_token_for` → 真的发网络请求 ⇒ `code` 不再是 `-2` ⇒ 红。
+    #[tokio::test]
+    async fn envelope_credentials_short_circuit_before_request() {
+        let account = json!({
+            "id": "envelope-only",
+            "access_token": {"$wbEncrypted": 1, "envelope": "…"},
+            "refresh_token": {"$wbEncrypted": 1, "envelope": "…"},
+        });
+        let resp = authenticated_post_for(
+            Region::Cn,
+            &account,
+            "https://example.invalid/api",
+            json!({}),
+        )
+        .await;
+        assert_eq!(resp["code"], -2, "应在发请求之前短路：{resp}");
+        let message = resp["message"].as_str().expect("message 应为字符串");
+        assert!(message.contains("加密信封"), "文案应可读：{message}");
+
+        // 阳性对照：明文凭据不得被这道护栏判定（问同一个谓词，不发网络请求）。
+        assert!(
+            envelope_token_error(&json!({"id": "plain", "access_token": "AT"})).is_none(),
+            "明文凭据不得被信封护栏拦下"
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_expiry_short_circuits_on_envelope_credential() {
+        let account = json!({
+            "id": "envelope-only",
+            "uid": "uid-envelope",
+            "domain": "www.workbuddy.cn",
+            "access_token": {"$wbEncrypted": 1, "envelope": "…"},
+            "refresh_token": {"$wbEncrypted": 1, "envelope": "…"},
+        });
+        let result = get_credit_expiry_for(Region::Cn, &account).await;
+
+        assert_eq!(result["ok"], false, "信封凭据必须在入口短路：{result}");
+        let message = result["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("加密信封"),
+            "必须给可读中文提示，而不是把上游 401 的 HTML 回显到卡片上：{message}"
+        );
+        assert!(
+            !message.contains("Authorization Required"),
+            "不得把 openresty 的错误页当作用户可见文案：{message}"
+        );
+
+        assert_eq!(
+            result["reason"],
+            json!(ENCRYPTED_CREDENTIAL_REASON),
+            "信封凭据必须带回契约常量 reason，前端不能靠解析中文文案判断：{result}"
+        );
+        assert_eq!(result["accountId"], json!("envelope-only"));
+
+        // 阳性对照（**不发网络请求**）：明文凭据不进这个分支 ⇒ 结构上不可能带上
+        // `encrypted_credential`。否则界面会对正常账号也喊「去扫码」。
+        let plain = json!({
+            "id": "plain-token",
+            "uid": "uid-plain",
+            "domain": "www.workbuddy.cn",
+            "access_token": "AT",
+        });
+        assert!(
+            envelope_token_error(&plain).is_none(),
+            "明文凭据不得被信封判据命中（否则 `reason` 会误标到正常账号上）"
+        );
+        // 契约常量本身也钉住：改值必须同步前端 `src/lib/api.ts` 的同名常量。
+        assert_eq!(ENCRYPTED_CREDENTIAL_REASON, "encrypted_credential");
+    }
+
+    /// 资源查询 origin 必须按 region 选择。
+    ///
+    /// CN 复用既有域判定（保证零变化）；Global 固定用该 region 的 billing 基址。
+    /// 若 Global 退化成 CN 的域判定，国际版请求会打到 CN 域名。
+    #[test]
+    fn new_resource_endpoint_for_is_region_scoped() {
+        let web_domain = json!({"domain": "www.workbuddy.cn"});
+        let cn_domain = json!({"domain": "www.codebuddy.cn"});
+
+        // Global：与账号 domain 无关，恒为国际版 billing 基址。
+        assert_eq!(
+            new_resource_endpoint_for(Region::Global, &web_domain),
+            "https://www.workbuddy.ai"
+        );
+        assert_eq!(
+            new_resource_endpoint_for(Region::Global, &cn_domain),
+            "https://www.workbuddy.ai"
+        );
+
+        // CN：沿用域判定（workbuddy.cn → web 端点，其余 → API 端点）。
+        assert_eq!(
+            new_resource_endpoint_for(Region::Cn, &web_domain),
+            WORKBUDDY_WEB_ENDPOINT
+        );
+        assert_eq!(
+            new_resource_endpoint_for(Region::Cn, &cn_domain),
+            WORKBUDDY_API_ENDPOINT
+        );
+
+        // 两版端点必须不同（Global 不得复用 CN 的域判定）。
+        assert_ne!(
+            new_resource_endpoint_for(Region::Global, &web_domain),
+            new_resource_endpoint_for(Region::Cn, &web_domain)
+        );
+    }
+
+    #[test]
+    fn parses_cockpit_resource_shape_and_marks_expiry() {
+        let now = 1_800_000_000_000_i64;
+        let resource = resource_summary(
+            &json!({
+                "PackageCode": "TCACA_code_007_nzdH5h4Nl0",
+                "PackageName": "活动赠送包",
+                "CycleCapacitySizePrecise": "100.5",
+                "CycleCapacityRemainPrecise": "75.25",
+                "DeductionEndTime": now + 2 * 24 * 3600 * 1000,
+                "Status": 0,
+            }),
+            now,
+        );
+
+        assert_eq!(resource["packageName"], "活动赠送包");
+        assert_eq!(resource["total"], 100.5);
+        assert_eq!(resource["remaining"], 75.25);
+        assert_eq!(resource["used"], 25.25);
+        assert_eq!(resource["expiringSoon"], true);
+        assert_eq!(resource["expired"], false);
+    }
+
+    #[test]
+    fn expiry_takes_the_earliest_candidate_not_the_first_present_one() {
+        // 2026-10-31 23:59:59 (+08:00)
+        const CYCLE_END: i64 = 1_793_462_399_000;
+        // 2035-01-13 02:33:49 (+08:00)：问题报告里被误取的扣减窗口结束时刻
+        const DEDUCTION_END: i64 = 2_052_239_629_000;
+
+        let resource = resource_summary(
+            &json!({
+                "PackageCode": "TCACA_code_008_cfWoLwvjU4",
+                "PackageName": "CodeBuddy个人体验版",
+                "CycleCapacitySizePrecise": "500",
+                "CycleCapacityRemainPrecise": "236.79",
+                "CycleCapacityUsedPrecise": "263.21",
+                "CycleStartTime": "2026-10-01 00:00:00",
+                "CycleEndTime": "2026-10-31 23:59:59",
+                "DeductionEndTime": DEDUCTION_END,
+                "ExpiredTime": "",
+            }),
+            CYCLE_END - 24 * 3600 * 1000,
+        );
+
+        assert_eq!(resource["expireAt"], CYCLE_END);
+        assert_eq!(resource["expired"], false);
+        // 还剩不到 2 天 ⇒ 落在「即将到期」窗口内（这也是用户真正想看到的提示）。
+        assert_eq!(resource["expiringSoon"], true);
+
+        // 反向：扣减窗口**早于**周期结束时，扣减窗口才是真实失效点。
+        let short = resource_summary(
+            &json!({
+                "CycleEndTime": "2026-10-31 23:59:59",
+                "DeductionEndTime": CYCLE_END - 10 * 24 * 3600 * 1000,
+            }),
+            CYCLE_END - 30 * 24 * 3600 * 1000,
+        );
+        assert_eq!(short["expireAt"], CYCLE_END - 10 * 24 * 3600 * 1000);
+
+        // 空串 / 缺失一律跳过，不得把包判成「没有到期时间」。
+        let only_cycle = resource_summary(
+            &json!({
+                "ExpiredTime": "",
+                "DeductionEndTime": "",
+                "CycleEndTime": "2026-10-31 23:59:59",
+            }),
+            CYCLE_END - 24 * 3600 * 1000,
+        );
+        assert_eq!(only_cycle["expireAt"], CYCLE_END);
+    }
+
+    #[test]
+    fn parses_second_millisecond_and_datetime_timestamps() {
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!(1_800_000_000))),
+            Some(1_800_000_000_000)
+        );
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!(1_800_000_000_000_i64))),
+            Some(1_800_000_000_000)
+        );
+        // 无时区的墙钟字符串**必须**按 UTC+8 解释（见下个用例的精确断言）。
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!("2099-01-02 03:04:05"))),
+            Some(4_070_977_445_000)
+        );
+    }
+
+    /// 腾讯返回的无时区时间戳是 **UTC+8 墙钟**，不是本机时区时间。
+    ///
+    /// 本用例断言的是**绝对时刻**，因此在任何机器时区下结果都必须相同 ——
+    /// 若有人把实现改回 `Local.from_local_datetime`，在非 UTC+8 的机器上会真的变红
+    /// （在 UTC+8 机器上两者恰好相等，所以这个断言是「钉死语义」而不是「钉死实现」）。
+    #[test]
+    fn wallclock_timestamps_are_utc_plus_8_regardless_of_machine_timezone() {
+        // 2000-01-01 00:00:00 (+08:00) == 1999-12-31T16:00:00Z == 946656000 秒
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!("2000-01-01 00:00:00"))),
+            Some(946_656_000_000)
+        );
+        // 带小数的同款墙钟
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!("2000-01-01 00:00:00.250"))),
+            Some(946_656_000_250)
+        );
+        // 只有日期时按当天 23:59:59（+08:00）
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!("2000-01-01"))),
+            Some(946_656_000_000 + (23 * 3600 + 59 * 60 + 59) * 1000)
+        );
+        // 显式带时区的形态原样采信，不受 UTC+8 约定影响
+        assert_eq!(
+            parse_timestamp_ms(Some(&json!("2000-01-01T00:00:00Z"))),
+            Some(946_684_800_000)
+        );
+    }
+
+    #[test]
+    fn extracts_nested_accounts() {
+        let response = json!({
+            "code": 0,
+            "data": {"Response": {"Data": {"Accounts": [{"PackageName": "基础包"}]}}}
+        });
+        let accounts = resource_accounts(&response);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["PackageName"], "基础包");
+    }
+
+    #[test]
+    fn extracts_new_top_level_accounts_and_packages() {
+        let response = json!({
+            "code": 0,
+            "data": {
+                "Accounts": [{"PackageCode": "paid"}],
+                "Packages": [{"PackageCode": "summary"}]
+            }
+        });
+        assert_eq!(resource_accounts(&response).len(), 1);
+        assert_eq!(resource_accounts(&response)[0]["PackageCode"], "paid");
+        assert_eq!(resource_packages(&response).len(), 1);
+        assert_eq!(resource_packages(&response)[0]["PackageCode"], "summary");
+        assert!(has_resource_accounts(&response));
+        assert!(has_resource_packages(&response));
+    }
+
+    #[test]
+    fn parses_summary_capacity_fields_and_explicit_used_value() {
+        let resource = resource_summary(
+            &json!({
+                "PackageCode": "summary",
+                "CycleTotalCapacity": "4485",
+                "CycleUsedCapacity": "2156.70999737",
+                "CycleRemainCapacity": "2328.29000263",
+                "CapacityUnit": "credits"
+            }),
+            1_800_000_000_000,
+        );
+        assert_eq!(resource["total"], 4485.0);
+        assert_eq!(resource["used"], 2156.70999737);
+        assert_eq!(resource["remaining"], 2328.29000263);
+        assert_eq!(resource["expireAt"], Value::Null);
+    }
+
+    #[test]
+    fn keeps_detail_batches_and_only_fills_missing_summary_packages() {
+        let summary = vec![
+            resource_summary(
+                &json!({
+                    "PackageCode": "activity",
+                    "CycleTotalCapacity": 100,
+                    "CycleRemainCapacity": 80
+                }),
+                1_800_000_000_000,
+            ),
+            resource_summary(
+                &json!({
+                    "PackageCode": "free",
+                    "CycleTotalCapacity": 500,
+                    "CycleRemainCapacity": 300
+                }),
+                1_800_000_000_000,
+            ),
+        ];
+        let details = vec![
+            resource_summary(
+                &json!({
+                    "PackageCode": "activity",
+                    "CycleCapacitySizePrecise": "60",
+                    "CycleCapacityRemainPrecise": "40",
+                    "DeductionEndTime": 1_800_000_100_000_i64
+                }),
+                1_800_000_000_000,
+            ),
+            resource_summary(
+                &json!({
+                    "PackageCode": "activity",
+                    "CycleCapacitySizePrecise": "40",
+                    "CycleCapacityRemainPrecise": "40",
+                    "DeductionEndTime": 1_800_000_200_000_i64
+                }),
+                1_800_000_000_000,
+            ),
+        ];
+        let merged = merge_resources(summary, details);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0]["remaining"], 40.0);
+        assert_eq!(merged[1]["remaining"], 40.0);
+        assert_eq!(merged[2]["packageCode"], "free");
+        assert_eq!(merged[2]["remaining"], 300.0);
+    }
+
+    #[test]
+    fn accepts_empty_detail_accounts_as_a_valid_success() {
+        let response = json!({"code": 0, "data": {"Accounts": []}});
+        assert!(is_success(&response));
+        assert!(has_resource_accounts(&response));
+        assert!(resource_accounts(&response).is_empty());
+    }
+
+    #[test]
+    fn partial_new_success_returns_available_resources() {
+        let resources = normalized_new_resources(
+            &json!({"code": 500, "message": "summary failed"}),
+            &json!({"code": 0, "data": {"Accounts": []}}),
+            &json!({
+                "code": 0,
+                "data": {"data": {"Accounts": [{
+                    "PackageCode": "free",
+                    "CycleCapacitySizePrecise": "100",
+                    "CycleCapacityRemainPrecise": "75"
+                }]}}
+            }),
+            1_800_000_000_000,
+        )
+        .expect("合法空 paid 和可用 free 明细应视为部分成功");
+
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0]["packageCode"], "free");
+        assert_eq!(resources[0]["remaining"], 75.0);
+    }
+
+    #[test]
+    fn valid_empty_new_arrays_do_not_trigger_legacy_fallback() {
+        let resources = normalized_new_resources(
+            &json!({"code": 0, "data": {"Packages": []}}),
+            &json!({"code": 0, "data": {"Accounts": []}}),
+            &json!({"code": 0, "data": {"Accounts": []}}),
+            1_800_000_000_000,
+        );
+        assert_eq!(resources, Some(Vec::new()));
+    }
+
+    #[test]
+    fn all_invalid_new_responses_require_legacy_fallback() {
+        let resources = normalized_new_resources(
+            &json!({"code": 500, "message": "summary failed"}),
+            &json!({"code": 500, "message": "paid failed"}),
+            &json!({"code": 0, "data": {}}),
+            1_800_000_000_000,
+        );
+        assert_eq!(resources, None);
+    }
+
+    #[test]
+    fn new_request_bodies_match_workbuddy_filters() {
+        let paid = paid_packages_body();
+        assert_eq!(paid["PageNumber"], 1);
+        assert_eq!(paid["PageSize"], 200);
+        assert_eq!(paid["Status"], json!([0, 3]));
+        assert_eq!(paid["NeedRenewInfo"], true);
+        assert!(paid["PackageCodes"]
+            .as_array()
+            .is_some_and(|codes| codes.iter().any(|code| code == "TCACA_code_038_OhvqZtiPKr")));
+
+        let free = free_packages_body();
+        assert_eq!(free["PageNumber"], 1);
+        assert_eq!(free["PageSize"], 200);
+        assert_eq!(free["Status"], json!([0, 3]));
+        assert!(free["SlicePeriodStartTime"].as_str().is_some());
+        assert!(free["SlicePeriodEndTime"].as_str().is_some());
+        assert!(free["PackageCodes"]
+            .as_array()
+            .is_some_and(|codes| codes.iter().any(|code| code == "TCACA_code_007_nzdH5h4Nl0")));
+        assert!(paid.get("NeedInUsage").is_none());
+        assert!(free.get("NeedInUsage").is_none());
+    }
+
+    #[test]
+    fn selects_endpoint_from_known_account_domain_and_keeps_headers_aligned() {
+        let codebuddy = json!({
+            "domain": "www.codebuddy.cn",
+            "access_token": "redacted",
+            "uid": "u1"
+        });
+        let workbuddy = json!({
+            "domain": "www.workbuddy.cn",
+            "access_token": "redacted",
+            "uid": "u2"
+        });
+        let unknown = json!({"domain": "attacker.example", "access_token": "redacted"});
+
+        assert_eq!(
+            new_resource_url(&codebuddy, RESOURCE_SUMMARY_PATH),
+            "https://www.codebuddy.cn/billing/meter/get-user-resource-summary"
+        );
+        assert_eq!(
+            new_resource_url(&workbuddy, RESOURCE_SUMMARY_PATH),
+            "https://www.workbuddy.cn/billing/meter/get-user-resource-summary"
+        );
+        assert_eq!(
+            new_resource_url(&unknown, RESOURCE_SUMMARY_PATH),
+            "https://www.codebuddy.cn/billing/meter/get-user-resource-summary"
+        );
+
+        let headers = resource_auth_headers(&codebuddy, new_resource_endpoint(&codebuddy));
+        assert_eq!(
+            headers.get("X-Client-Platform").map(String::as_str),
+            Some("web")
+        );
+        assert_eq!(
+            headers.get("Accept").map(String::as_str),
+            Some("application/json, text/plain, */*")
+        );
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer redacted")
+        );
+        assert_eq!(headers.get("X-User-Id").map(String::as_str), Some("u1"));
+        assert_eq!(
+            headers.get("X-Domain").map(String::as_str),
+            Some("www.codebuddy.cn")
+        );
+        assert_eq!(
+            headers.get("Origin").map(String::as_str),
+            Some("https://www.codebuddy.cn")
+        );
+        assert_eq!(
+            headers.get("Referer").map(String::as_str),
+            Some("https://www.codebuddy.cn/profile/plans-usage")
+        );
+
+        let workbuddy_headers =
+            resource_auth_headers(&workbuddy, new_resource_endpoint(&workbuddy));
+        assert_eq!(
+            workbuddy_headers.get("Origin").map(String::as_str),
+            Some("https://www.workbuddy.cn")
+        );
+        assert_eq!(
+            workbuddy_headers.get("Referer").map(String::as_str),
+            Some("https://www.workbuddy.cn/profile/plans-usage")
+        );
+        assert_eq!(
+            workbuddy_headers.get("X-Domain").map(String::as_str),
+            Some("www.workbuddy.cn")
+        );
+
+        let unknown_headers = resource_auth_headers(&unknown, new_resource_endpoint(&unknown));
+        assert_eq!(
+            unknown_headers.get("Origin").map(String::as_str),
+            Some("https://www.codebuddy.cn")
+        );
+        assert_eq!(
+            unknown_headers.get("Referer").map(String::as_str),
+            Some("https://www.codebuddy.cn/profile/plans-usage")
+        );
+
+        // 官方用量 URL 固定 workbuddy.cn，Origin 必须跟请求 host，X-Domain 仍用账号域。
+        let usage_url = "https://www.workbuddy.cn/billing/meter/get-user-request-usage";
+        assert_eq!(request_origin(usage_url), WORKBUDDY_WEB_ENDPOINT);
+        let usage_headers = resource_auth_headers(&codebuddy, request_origin(usage_url));
+        assert_eq!(
+            usage_headers.get("Origin").map(String::as_str),
+            Some("https://www.workbuddy.cn")
+        );
+        assert_eq!(
+            usage_headers.get("X-Domain").map(String::as_str),
+            Some("www.codebuddy.cn")
+        );
+        assert_eq!(
+            request_origin("https://www.codebuddy.cn/v2/billing/meter/get-user-resource"),
+            WORKBUDDY_API_ENDPOINT
+        );
+    }
+
+    #[test]
+    fn transport_error_is_code_minus_one_with_message() {
+        assert!(is_transport_error(&json!({
+            "code": -1,
+            "message": "error sending request for url (https://www.workbuddy.cn/billing/meter/get-user-resource-summary)"
+        })));
+        assert!(!is_transport_error(&json!({"code": -1, "message": ""})));
+        assert!(!is_transport_error(&json!({"code": -1, "message": "   "})));
+        assert!(!is_transport_error(&json!({"code": -1})));
+        assert!(!is_transport_error(&json!({
+            "code": 10085,
+            "msg": "请求不合法，如有疑问请联系客服"
+        })));
+        assert!(!is_transport_error(
+            &json!({"code": 401, "message": "unauthorized"})
+        ));
+        assert!(!is_transport_error(&json!({"code": 0, "data": {}})));
+        assert!(!is_unauthorized(&json!({
+            "code": 10085,
+            "msg": "请求不合法，如有疑问请联系客服"
+        })));
+    }
+
+    #[test]
+    fn accepts_object_response_without_code() {
+        assert!(is_success(&json!({"data": {"Response": {"Data": {}}}})));
+        assert!(is_success(
+            &json!({"data": {"Response": {"Data": {"Accounts": []}}}})
+        ));
+        assert!(is_success(&json!({"code": "0", "data": {}})));
+        assert!(!is_success(&json!({"message": "failed"})));
+        assert!(!is_success(&json!({"data": {}, "ok": false})));
+        assert!(!is_success(&Value::Null));
+        assert!(!is_success(&json!({"code": 500, "message": "failed"})));
+    }
+
+    #[test]
+    fn sums_only_resources_that_are_expiring_soon() {
+        let now = 1_800_000_000_000_i64;
+        let resources = [
+            resource_summary(
+                &json!({
+                    "CycleCapacityRemainPrecise": 80,
+                    "DeductionEndTime": now + 2 * 24 * 3600 * 1000,
+                }),
+                now,
+            ),
+            resource_summary(
+                &json!({
+                    "CycleCapacityRemainPrecise": 20,
+                    "DeductionEndTime": now + 20 * 24 * 3600 * 1000,
+                }),
+                now,
+            ),
+        ];
+        let expiring: f64 = resources
+            .iter()
+            .filter(|resource| resource["expiringSoon"] == true)
+            .map(|resource| resource["remaining"].as_f64().unwrap())
+            .sum();
+        assert_eq!(expiring, 80.0);
+    }
+}
