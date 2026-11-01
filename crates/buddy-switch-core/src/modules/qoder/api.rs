@@ -327,7 +327,7 @@ pub struct FlattenedMessages {
 ///
 /// 为什么要它：长历史里的工具输出（构建日志 / 文件内容 / 测试回显）占掉的 token
 /// 常常比正文还多；而且**文本化历史里的工具结果是回声的主要来源**（模型照着复述）。
-/// 参考实现（qoder2api-hub `_shrink_tool_result`）默认单侧 2000 字符。
+/// 默认单侧 2000 字符。
 ///
 /// 环境变量 `BUDDY_SWITCH_QODER_TOOL_KEEP`：
 /// - 正整数 ⇒ 单侧保留字符数；

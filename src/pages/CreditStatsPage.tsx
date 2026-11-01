@@ -1,6 +1,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarDays, CircleAlert, Coins, Info, Loader2, RefreshCw, TrendingDown, TrendingUp } from "lucide-react";
+import { CalendarDays, CircleAlert, Coins, Info, Loader2, RefreshCw, TrendingDown } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -164,6 +164,14 @@ export default function CreditStatsPage({
     [stats, viewWindow],
   );
   const totalOut = bars.reduce((sum, bar) => sum + bar.outAmt, 0);
+  /* 跨日减少：后端单列（不进 usage），这里汇总成一句提示，避免「凭空扣分」的观感。 */
+  const totalCarry = useMemo(() => {
+    if (!stats) return 0;
+    const keys = new Set(usageWindowKeys(viewWindow));
+    return stats.daily
+      .filter((point) => keys.has(point.date))
+      .reduce((sum, point) => sum + (point.carry ?? 0), 0);
+  }, [stats, viewWindow]);
 
   const balancePoints = useMemo(
     () => (stats ? balanceCurve(bars, stats.summary.currentRemaining) : []),
@@ -222,6 +230,68 @@ export default function CreditStatsPage({
     return creditByUid.get(uid) ?? 0;
   };
 
+  /* ── 官方口径 ──
+     后端 `credit_usage` 本来就把 `official_usage` 一起返回了（`stats.officialUsage`），
+     只是这一页一直没用它：消耗走的是「会话 credit 聚合」和「快照差值」，
+     两者都会把副本、跨日、过期混进来（实测同一账号本周 1,054 vs 官方 891）。
+     官方逐日是按请求记账的权威数据，优先用它；官方不可用 / 窗口超出采集范围时
+     再回退本地口径，并在卡片上标明，避免「数字变了但不知道为什么」。 */
+  const officialUsageData = stats?.officialUsage;
+  const officialUsable =
+    officialUsageData?.status === "complete" || officialUsageData?.status === "partial";
+
+  const officialDailyByAccount = useMemo(() => {
+    const map = new Map<string, Map<string, number>>();
+    for (const account of officialUsageData?.accounts ?? []) {
+      if (!account.ok) continue;
+      const dayMap = new Map<string, number>();
+      for (const point of account.daily ?? []) {
+        dayMap.set(point.date, point.usage ?? 0);
+      }
+      map.set(account.accountId, dayMap);
+    }
+    return map;
+  }, [officialUsageData]);
+
+  /* 窗口与官方采集范围的**交集**。
+     ⚠️ 不能要求「窗口起点 >= rangeStart」：官方只从 10-02 开始，而「上月」的起点是
+     10-01 —— 只早一天，整窗被判超出 ⇒ 回退本地口径 ⇒ 大多数账号本地没有会话记录 ⇒ 全是 0。
+     改为裁剪到交集：范围内的日期照常用官方，超出部分不计（并在卡片上标明起点）。 */
+  const officialRangeKeys = useMemo(() => {
+    if (!officialUsable || !officialUsageData) return null;
+    const keys = usageWindowKeys(viewWindow).filter(
+      (key) => key >= officialUsageData.rangeStart && key <= officialUsageData.rangeEnd,
+    );
+    return keys.length > 0 ? keys : null;
+  }, [officialUsable, officialUsageData, viewWindow]);
+
+  /** 窗口是否有部分日期落在官方范围之外（用于提示「官方数据自 X 起」）。 */
+  const officialClipped = useMemo(() => {
+    if (!officialRangeKeys) return false;
+    return officialRangeKeys.length < usageWindowKeys(viewWindow).length;
+  }, [officialRangeKeys, viewWindow]);
+
+  /** 某账号在窗口内的**官方**消耗；不可用时返回 null。 */
+  const officialCreditOf = (accountId: string): number | null => {
+    if (!officialRangeKeys) return null;
+    const dayMap = officialDailyByAccount.get(accountId);
+    if (!dayMap) return null;
+    let sum = 0;
+    for (const key of officialRangeKeys) {
+      sum += dayMap.get(key) ?? 0;
+    }
+    return sum;
+  };
+
+  /** 全账号在窗口内的官方消耗合计（顶部「区间消耗」卡用）。 */
+  const officialWindowOut = useMemo(() => {
+    if (!officialRangeKeys || !officialUsageData) return null;
+    const keys = new Set(officialRangeKeys);
+    return officialUsageData.daily
+      .filter((point) => keys.has(point.date))
+      .reduce((sum, point) => sum + (point.usage ?? 0), 0);
+  }, [officialRangeKeys, officialUsageData]);
+
   const accountCount = stats?.accounts.length ?? 0;
   const hasAnyData =
     Boolean(stats) &&
@@ -263,17 +333,28 @@ export default function CreditStatsPage({
       hint: t("wbStats.usage.credits.accountsHint", { count: accountCount }),
     },
     {
-      icon: TrendingUp,
-      label: t("wbStats.usage.credits.in"),
-      value: "—",
-      hint: t("wbStats.usage.caption.singleSide"),
+      icon: TrendingDown,
+      label: t("wbStats.usage.credits.out"),
+      value: signedCredits(officialWindowOut ?? totalOut, "-"),
+      hint:
+        officialWindowOut !== null
+          ? officialClipped && officialUsageData
+            ? t("wbStats.usage.credits.outHintClipped", {
+                date: officialUsageData.rangeStart.slice(5).replace("-", "/"),
+              })
+            : t("wbStats.usage.credits.outHintOfficial")
+          : totalCarry > 0
+            ? t("wbStats.usage.credits.carryHint", { value: formatCredits(totalCarry) })
+            : t("wbStats.usage.credits.outHintLocal"),
     },
-    { icon: TrendingDown, label: t("wbStats.usage.credits.out"), value: signedCredits(totalOut, "-") },
     {
       icon: CalendarDays,
       label: t("wbStats.usage.credits.expiring"),
       value: formatCredits(expiringTotal),
-      hint: soonestDay ? `D+${soonestDay}` : undefined,
+      /* 金额是**7 天内**到期额度之和，光写「D+1」会让人以为只有明天那点 —— 把窗口写出来。 */
+      hint: soonestDay
+        ? t("wbStats.usage.credits.expiringHint", { value: `D+${soonestDay}` })
+        : undefined,
     },
   ];
 
@@ -367,8 +448,11 @@ export default function CreditStatsPage({
 
           {accountCount > 0 ? (
             <section className="min-w-0 space-y-2.5" aria-labelledby="credit-resource-title">
-              <h2 id="credit-resource-title" className="px-1 text-[13px] font-medium leading-5">
+              <h2 id="credit-resource-title" className="flex items-baseline gap-2 px-1 text-[13px] font-medium leading-5">
                 {t("wbStats.credit.creditDetailTitle")}
+                <span className="text-[11px] font-normal text-muted-foreground">
+                  {windowLabelOf(viewWindow)}
+                </span>
               </h2>
               <Card className="min-w-0 gap-0 overflow-hidden rounded-xl py-0 shadow-none">
                 <div className="divide-y divide-border/60">
@@ -376,20 +460,42 @@ export default function CreditStatsPage({
                       近 30 天 / 自定义），不再固定摊三档 —— 用户选什么窗口就看什么窗口。 */}
                   <div className="flex min-w-0 items-center gap-3 border-b border-border/60 px-4 py-2 text-[11px] text-muted-foreground sm:px-5">
                     <span className="min-w-0 flex-1">{t("wbStats.credit.accountColumn")}</span>
-                    <span className="w-[96px] shrink-0 text-right">{windowLabelOf(viewWindow)}</span>
+                    <span className="w-[96px] shrink-0 text-right" title={windowLabelOf(viewWindow)}>
+                      {t("wbStats.credit.usageColumn")}
+                    </span>
                   </div>
                   {stats.accounts.map((account) => {
                     const name = displayText(account.accountName) || account.accountId;
+                    /* 本期额度（周期包）：来自实时额度接口，`creditMap` 的键就是账号库 id。 */
+                    const cycle = creditMap[account.accountId]?.cycle ?? null;
+                    const cycleEndText =
+                      cycle?.endAt != null
+                        ? new Date(cycle.endAt).toLocaleDateString("zh-CN", {
+                            month: "2-digit",
+                            day: "2-digit",
+                          })
+                        : "—";
                     return (
                       <div
                         key={account.accountId}
                         className="flex min-w-0 items-center gap-3 px-4 py-2.5 sm:px-5"
                       >
-                        <span className="min-w-0 flex-1 truncate text-xs font-medium" title={name}>
-                          {name}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-medium" title={name}>
+                            {name}
+                          </span>
+                          {cycle && (cycle.total ?? 0) > 0 ? (
+                            <span className="block truncate text-[10px] text-muted-foreground">
+                              {t("wbStats.credit.cycleLine", {
+                                used: formatCredits(cycle.used ?? 0),
+                                total: formatCredits(cycle.total ?? 0),
+                                date: cycleEndText,
+                              })}
+                            </span>
+                          ) : null}
                         </span>
                         <span className="w-[96px] shrink-0 text-right text-[11.5px] font-medium tabular-nums">
-                          {formatCredits(windowCredit(account))}
+                          {signedCredits(officialCreditOf(account.accountId) ?? windowCredit(account), "-")}
                         </span>
                       </div>
                     );

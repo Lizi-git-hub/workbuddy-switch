@@ -112,6 +112,7 @@ export const zh = {
   //    但机制保留 ⇒ 措辞只能是「尚未支持」，**不许**用「未检测到客户端」—— 后者会**引导用户去装，
   //    而装了也没用**（原型断言 `verify-behaviors.cjs:1297-1302` 反向禁止）。
   "wbAccounts.program.plannedHint": "尚未支持",
+  "wbAccounts.card.packageCount": "{n} 个积分包",
   "wbAccounts.card.unnamed": "未命名账号",
   "wbAccounts.card.checkedIn": "已签到",
   // 原型 `accountStatus()`（`buddy-switch-prototype.html:2390-2395`）是**互斥的一枚**状态：

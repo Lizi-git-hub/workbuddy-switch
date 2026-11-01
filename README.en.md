@@ -260,7 +260,6 @@ npm run check:api     # validate the frontend API contract only
 ```
 crates/
   buddy-switch-core/     # accounts, auth, OAuth, processes, switching, sessions, check-in, regions, Trae / Qoder modules
-  buddy-switch-gateway/  # OpenAI / Anthropic compatible gateway
   buddy-switch-server/   # HTTP server + CLI (axum API + rust-embed frontend)
 src-tauri/               # desktop host (thin Tauri command wrappers + tray)
 src/                     # frontend: components / pages / lib / locales
@@ -279,7 +278,6 @@ Full index at [docs/README.md](docs/README.md). The most-read ones:
 ## Credits
 
 - **[changexbc/workbuddy-switch](https://github.com/changexbc/workbuddy-switch)** (MIT) — foundation of the account data format, multi-account switching, and credit / token analytics.
-- **[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)** — the idea of exposing model quota via an OpenAI-compatible endpoint.
 
 Product names and trademarks belong to their respective owners.
 

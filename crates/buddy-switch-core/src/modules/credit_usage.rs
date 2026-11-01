@@ -32,6 +32,10 @@ struct Snapshot {
     account_name: String,
     total: f64,
     remaining: f64,
+    /// 资源包明细（`packageCode` / `packageName` / `total` / `remaining` / `expireAt`）。
+    /// 旧快照没有这个字段 ⇒ 空数组，聚合时退化为「余额差值」口径。
+    /// 有了它才能把「余额为什么涨了」归因到具体包（月初基础额度 / 签到 / 充值）。
+    resources: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +86,11 @@ fn snapshot_from_value(value: &Value) -> Option<Snapshot> {
             .unwrap_or_else(|| "unknown".to_string()),
         total,
         remaining,
+        resources: value
+            .get("resources")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
@@ -91,6 +100,7 @@ fn snapshot_value(
     account_name: &str,
     total: f64,
     remaining: f64,
+    resources: &[Value],
 ) -> Value {
     json!({
         "ts": ts,
@@ -98,7 +108,34 @@ fn snapshot_value(
         "accountName": account_name,
         "total": total.max(0.0),
         "remaining": remaining.max(0.0),
+        "resources": resources,
     })
+}
+
+/// 两次快照的资源包是否「等价」（按 `packageCode` 排序后比 `remaining`）。
+///
+/// 用途：去重判断不能只看总额 —— 总额没变但某个包过期 / 换包时仍然要留一条，
+/// 否则「过期」这件事永远观察不到。
+fn same_resources(left: &[Value], right: &[Value]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let signature = |items: &[Value]| -> Vec<(String, i64)> {
+        let mut rows: Vec<(String, i64)> = items
+            .iter()
+            .map(|row| {
+                let remaining = row
+                    .get("remaining")
+                    .and_then(Value::as_f64)
+                    .map(|value| (value * 100.0).round() as i64)
+                    .unwrap_or(-1);
+                (resource_key(row), remaining)
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    signature(left) == signature(right)
 }
 
 /// 读取本地观察快照；文件缺失或损坏时返回空列表。
@@ -117,6 +154,7 @@ fn should_suppress_duplicate(
     account_id: &str,
     total: f64,
     remaining: f64,
+    resources: &[Value],
     at_ms: i64,
 ) -> bool {
     let Some(latest) = snapshots
@@ -132,6 +170,7 @@ fn should_suppress_duplicate(
         && at_ms - latest.ts <= CREDIT_SNAPSHOT_DEDUPE_WINDOW_MS
         && (latest.total - total).abs() < f64::EPSILON
         && (latest.remaining - remaining).abs() < f64::EPSILON
+        && same_resources(&latest.resources, resources)
 }
 
 fn normalize_snapshots(snapshots: &[Value], at_ms: i64) -> Vec<Value> {
@@ -153,7 +192,13 @@ fn normalize_snapshots(snapshots: &[Value], at_ms: i64) -> Vec<Value> {
 ///
 /// 同一账号同一资源值在短时间内只保留一条；资源值发生变化时立即保留，
 /// 这样余额下降可以归因到新快照。返回值表示本次是否实际写入。
-pub fn record_snapshot(account_id: &str, account_name: &str, total: f64, remaining: f64) -> bool {
+pub fn record_snapshot(
+    account_id: &str,
+    account_name: &str,
+    total: f64,
+    remaining: f64,
+    resources: &[Value],
+) -> bool {
     let account_id = account_id.trim();
     if account_id.is_empty() {
         return false;
@@ -162,7 +207,7 @@ pub fn record_snapshot(account_id: &str, account_name: &str, total: f64, remaini
     let at_ms = now_ms();
     let _guard = SNAPSHOT_WRITE_LOCK.lock().unwrap();
     let snapshots = load_snapshots();
-    if should_suppress_duplicate(&snapshots, account_id, total, remaining, at_ms) {
+    if should_suppress_duplicate(&snapshots, account_id, total, remaining, resources, at_ms) {
         return false;
     }
 
@@ -173,6 +218,7 @@ pub fn record_snapshot(account_id: &str, account_name: &str, total: f64, remaini
         account_name.trim(),
         total,
         remaining,
+        resources,
     ));
     if kept.len() > CREDIT_SNAPSHOT_MAX_RECORDS {
         kept.drain(..kept.len() - CREDIT_SNAPSHOT_MAX_RECORDS);
@@ -186,6 +232,92 @@ pub fn record_snapshot(account_id: &str, account_name: &str, total: f64, remaini
         return false;
     }
     true
+}
+
+/// 资源包的唯一键。
+///
+/// ⚠️ 不能只用 `packageCode`：实测同一账号 63 个包只有 **2 个不同 code**
+/// （62 个「运营裂变包」共用 `TCACA_code_007_…`），按 code 建索引会互相覆盖，
+/// 归因结果退化成「只剩最后一个包」。批次之间到期时间不同，拼上它才唯一。
+fn resource_key(row: &Value) -> String {
+    let code = row.get("packageCode").and_then(Value::as_str).unwrap_or("");
+    let expire = row.get("expireAt").and_then(Value::as_i64).unwrap_or(0);
+    let total = row
+        .get("total")
+        .and_then(Value::as_f64)
+        .map(|value| (value * 100.0).round() as i64)
+        .unwrap_or(0);
+    format!("{code}|{expire}|{total}")
+}
+
+/// 把「余额回升」归因到具体资源包：新增的包、或 `remaining` 增加的包。
+///
+/// 这是「月初 +500 基础额度」能被单独看见的关键 —— 差值法只知道总额涨了多少，
+/// 包级对比才知道是**哪个包**涨了（基础额度 / 签到 / 充值）。
+/// 旧快照没有 `resources` ⇒ 返回一条无名字的笼统来源，金额取整体回升值。
+fn attribute_income(before: &[Value], after: &[Value], amount: f64) -> Vec<Value> {
+    /* ⚠️ 前一条快照没有资源包明细（升级前的旧快照）⇒ **不能**做包级归因：
+       否则「after 里所有包都没见过」会把全部存活额度当成新增，入账虚高几十倍。
+       这种情况只能退回笼统来源。 */
+    if before.is_empty() || after.is_empty() {
+        return vec![json!({
+            "name": Value::Null,
+            "amount": (amount * 100.0).round() / 100.0,
+        })];
+    }
+
+    let mut previous: HashMap<String, f64> = HashMap::new();
+    for row in before {
+        previous.insert(
+            resource_key(row),
+            row.get("remaining").and_then(Value::as_f64).unwrap_or(0.0),
+        );
+    }
+
+    /* 按**包名**聚合金额：同一批发放常常是 5 个 100 的裂变包，
+       逐个列出来只会得到「裂变包 +100」×5，合并后才是用户能读懂的「+500」。 */
+    let mut by_name: Vec<(String, f64, Option<i64>)> = Vec::new();
+    for row in after {
+        let key = resource_key(row);
+        let now = row.get("remaining").and_then(Value::as_f64).unwrap_or(0.0);
+        /* 新出现的包 ⇒ 整包都算入账；已有的包 ⇒ 只算增量。 */
+        let gained = match previous.get(&key) {
+            Some(&was) => now - was,
+            None => now,
+        };
+        if gained <= 0.01 {
+            continue;
+        }
+        let name = row
+            .get("packageName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let cycle_end = row.get("cycleEndAt").and_then(Value::as_i64);
+        match by_name.iter_mut().find(|(existing, _, _)| existing == &name) {
+            Some(slot) => slot.1 += gained,
+            None => by_name.push((name, gained, cycle_end)),
+        }
+    }
+    by_name.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut sources: Vec<Value> = by_name
+        .into_iter()
+        .map(|(name, gained, cycle_end)| {
+            json!({
+                "name": if name.is_empty() { Value::Null } else { json!(name) },
+                "amount": (gained * 100.0).round() / 100.0,
+                "cycleEndAt": cycle_end,
+            })
+        })
+        .collect();
+    if sources.is_empty() && amount > 0.01 {
+        sources.push(json!({
+            "name": Value::Null,
+            "amount": (amount * 100.0).round() / 100.0,
+        }));
+    }
+    sources
 }
 
 fn local_date(ts: i64) -> Option<NaiveDate> {
@@ -202,6 +334,8 @@ fn local_date_string(ts: i64) -> Option<String> {
 /// 生成逐日观察序列（daily_start..=today，无数据的天补 0）；无快照起点时返回空数组。
 fn local_daily_series(
     daily: &HashMap<String, f64>,
+    income: &HashMap<String, f64>,
+    carry: &HashMap<String, f64>,
     daily_start: Option<NaiveDate>,
     today: NaiveDate,
 ) -> Vec<Value> {
@@ -215,6 +349,8 @@ fn local_daily_series(
         points.push(json!({
             "date": key,
             "usage": daily.get(&key).copied().unwrap_or(0.0),
+            "income": income.get(&key).copied().unwrap_or(0.0),
+            "carry": carry.get(&key).copied().unwrap_or(0.0),
         }));
         date += ChronoDuration::days(1);
     }
@@ -350,8 +486,11 @@ fn build_statistics(
         .min();
 
     let mut usage_events = Vec::new();
+    let mut income_events: Vec<(i64, Value)> = Vec::new();
     let mut usage_totals: HashMap<String, (f64, f64, f64)> = HashMap::new();
     let mut daily_usage: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    let mut daily_income: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    let mut daily_carry: HashMap<String, HashMap<String, f64>> = HashMap::new();
     let mut latest_snapshots = HashMap::new();
     for (account_id, mut snapshots) in by_account {
         snapshots.sort_by_key(|snapshot: &Snapshot| snapshot.ts);
@@ -361,34 +500,68 @@ fn build_statistics(
         for pair in snapshots.windows(2) {
             let previous = &pair[0];
             let current = &pair[1];
-            let amount = previous.remaining - current.remaining;
-            if amount <= f64::EPSILON {
+            let delta = previous.remaining - current.remaining;
+            if delta.abs() <= f64::EPSILON {
                 continue;
             }
             let Some(date) = local_date_string(current.ts) else {
                 continue;
             };
+            if delta < 0.0 {
+                /* 余额回升 = 入账（签到 / 活动 / 返还 / 月初基础额度），按**后一条快照的日期**记账。 */
+                let amount = -delta;
+                *daily_income
+                    .entry(account_id.clone())
+                    .or_default()
+                    .entry(date.clone())
+                    .or_default() += amount;
+                income_events.push((
+                    current.ts,
+                    json!({
+                        "kind": "income",
+                        "ts": current.ts,
+                        "date": date,
+                        "accountId": account_id,
+                        "accountName": account_names
+                            .get(&account_id)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        "amount": (amount * 100.0).round() / 100.0,
+                        "sources": attribute_income(&previous.resources, &current.resources, amount),
+                    }),
+                ));
+                continue;
+            }
+            if local_date_string(previous.ts).as_deref() != Some(date.as_str()) {
+                /* 跨日减少（过期 / 前一晚用量）：**不算当天消耗**，单列 carry 供提示。 */
+                *daily_carry
+                    .entry(account_id.clone())
+                    .or_default()
+                    .entry(date)
+                    .or_default() += delta;
+                continue;
+            }
             let entry = usage_totals.entry(account_id.clone()).or_default();
             let (today_usage, week_usage, month_usage) = usage_in_windows(&date, today);
             if today_usage {
-                entry.0 += amount;
+                entry.0 += delta;
             }
             if week_usage {
-                entry.1 += amount;
+                entry.1 += delta;
             }
             if month_usage {
-                entry.2 += amount;
+                entry.2 += delta;
             }
             *daily_usage
                 .entry(account_id.clone())
                 .or_default()
                 .entry(date.clone())
-                .or_default() += amount;
+                .or_default() += delta;
             usage_events.push(UsageEvent {
                 ts: current.ts,
                 date,
                 account_id: account_id.clone(),
-                amount,
+                amount: delta,
             });
         }
     }
@@ -486,6 +659,8 @@ fn build_statistics(
                 "lastCheckinResult": last_checkin.map(|event| event.result.clone()),
                 "daily": local_daily_series(
                     daily_usage.get(account_id).unwrap_or(&empty_account_daily),
+                    daily_income.get(account_id).unwrap_or(&empty_account_daily),
+                    daily_carry.get(account_id).unwrap_or(&empty_account_daily),
                     daily_start,
                     today,
                 ),
@@ -499,7 +674,25 @@ fn build_statistics(
             *aggregate_daily.entry(date.clone()).or_insert(0.0) += amount;
         }
     }
-    let daily = local_daily_series(&aggregate_daily, daily_start, today);
+    let mut aggregate_income: HashMap<String, f64> = HashMap::new();
+    for account_daily in daily_income.values() {
+        for (date, amount) in account_daily {
+            *aggregate_income.entry(date.clone()).or_insert(0.0) += amount;
+        }
+    }
+    let mut aggregate_carry: HashMap<String, f64> = HashMap::new();
+    for account_daily in daily_carry.values() {
+        for (date, amount) in account_daily {
+            *aggregate_carry.entry(date.clone()).or_insert(0.0) += amount;
+        }
+    }
+    let daily = local_daily_series(
+        &aggregate_daily,
+        &aggregate_income,
+        &aggregate_carry,
+        daily_start,
+        today,
+    );
 
     let mut events: Vec<(i64, Value)> = usage_events
         .iter()
@@ -532,6 +725,7 @@ fn build_statistics(
             }),
         )
     }));
+    events.extend(income_events);
     events.sort_by_key(|event| Reverse(event.0));
     let recent_events: Vec<Value> = events
         .into_iter()
@@ -978,7 +1172,7 @@ mod tests {
     }
 
     fn snap(ts: i64, remaining: f64) -> Value {
-        snapshot_value(ts, "account-1", "one@example.com", 100.0, remaining)
+        snapshot_value(ts, "account-1", "one@example.com", 100.0, remaining, &[])
     }
 
     #[test]
@@ -991,23 +1185,38 @@ mod tests {
     }
 
     #[test]
-    fn positive_decreases_are_assigned_to_the_newer_local_day() {
+    fn cross_day_decrease_is_carry_not_usage() {
+        /* 跨零点的那段减少无法归因（过期或前一晚用量）⇒ 只记 carry，不算今天消耗。
+           旧实现把它算进新的一天，用户「今天还没用就显示扣了 112」即由此而来。 */
         let now = at_local_date(0, 12);
         let yesterday = at_local_date(1, 12);
         let stats = build_statistics(&[snap(yesterday, 100.0), snap(now, 70.0)], &[], &[], now);
 
-        assert_eq!(stats["summary"]["usageToday"], 30.0);
-        assert_eq!(stats["summary"]["usage7Days"], 30.0);
-        assert_eq!(
-            stats["daily"].as_array().unwrap().last().unwrap()["usage"],
-            30.0
-        );
-        assert_eq!(stats["events"][0]["kind"], "usage");
-        assert_eq!(stats["events"][0]["amount"], 30.0);
+        assert_eq!(stats["summary"]["usageToday"], 0.0);
+        let last = stats["daily"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["usage"], 0.0);
+        assert_eq!(last["carry"], 30.0);
+        assert!(stats["events"].as_array().unwrap().is_empty());
     }
 
     #[test]
-    fn increases_reset_the_baseline_without_negative_usage() {
+    fn same_day_decrease_counts_as_usage() {
+        let now = at_local_date(0, 18);
+        let morning = at_local_date(0, 9);
+        let stats = build_statistics(&[snap(morning, 100.0), snap(now, 80.0)], &[], &[], now);
+
+        assert_eq!(stats["summary"]["usageToday"], 20.0);
+        assert_eq!(
+            stats["daily"].as_array().unwrap().last().unwrap()["usage"],
+            20.0
+        );
+        assert_eq!(stats["events"][0]["kind"], "usage");
+        assert_eq!(stats["events"][0]["amount"], 20.0);
+    }
+
+    #[test]
+    fn increases_become_income_and_reset_the_baseline() {
+        /* 余额回升 = 入账（签到 / 活动）；它同时重置基线，不会产生负的「用量」。 */
         let now = at_local_date(0, 12);
         let earlier = at_local_date(2, 12);
         let yesterday = at_local_date(1, 12);
@@ -1022,9 +1231,26 @@ mod tests {
             now,
         );
 
-        assert_eq!(stats["summary"]["usageToday"], 10.0);
-        assert_eq!(stats["summary"]["usage7Days"], 10.0);
-        assert_eq!(stats["events"].as_array().unwrap().len(), 1);
+        assert_eq!(stats["summary"]["usageToday"], 0.0);
+        /* 入账本身会进 `events`（`kind = "income"`，供前端展示来源拆解），
+           但不允许出现 `usage` 事件 —— 余额回升不能被当成用量。 */
+        let events = stats["events"].as_array().unwrap();
+        assert!(
+            events.iter().all(|event| event["kind"] != "usage"),
+            "余额回升不应产生 usage 事件: {events:?}"
+        );
+        assert_eq!(events.len(), 1, "应有一条入账事件: {events:?}");
+        assert_eq!(events[0]["kind"], "income");
+        assert_eq!(events[0]["amount"], 25.0);
+        let points = stats["daily"].as_array().unwrap();
+        let yesterday_key = local_date_string(yesterday).unwrap();
+        let yesterday_point = points
+            .iter()
+            .find(|point| point["date"] == json!(yesterday_key))
+            .expect("yesterday point");
+        assert_eq!(yesterday_point["income"], 25.0);
+        /* 昨天 125 → 今天 115 是跨日减少 ⇒ carry，不是消耗。 */
+        assert_eq!(points.last().unwrap()["carry"], 10.0);
     }
 
     #[test]
@@ -1177,6 +1403,7 @@ mod tests {
             "account-1",
             100.0,
             100.0,
+            &[],
             now,
         ));
         assert!(should_suppress_duplicate(
@@ -1184,12 +1411,13 @@ mod tests {
             "account-1",
             100.0,
             100.0,
+            &[],
             now,
         ));
     }
 
     fn snap_for(account_id: &str, ts: i64, remaining: f64) -> Value {
-        snapshot_value(ts, account_id, "user@example.com", 100.0, remaining)
+        snapshot_value(ts, account_id, "user@example.com", 100.0, remaining, &[])
     }
 
     #[test]

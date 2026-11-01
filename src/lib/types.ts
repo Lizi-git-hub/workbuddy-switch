@@ -1097,6 +1097,19 @@ export interface CreditResource {
   expireAt: number | null;
   expired: boolean;
   expiringSoon: boolean;
+  /** 周期额度起止（月度基础额度走这套字段；旧接口缺省）。 */
+  cycleStartAt?: number | null;
+  cycleEndAt?: number | null;
+}
+
+/** 单个账号的「本期额度」—— 周期包本体（如每月发放的基础额度）。 */
+export interface CreditCycle {
+  name: string | null;
+  total: number | null;
+  used: number | null;
+  remaining: number | null;
+  startAt: number | null;
+  endAt: number | null;
 }
 
 export interface CreditExpiry {
@@ -1111,6 +1124,8 @@ export interface CreditExpiry {
   soonestExpireAt?: number | null;
   expiringSoon?: boolean;
   expired?: boolean;
+  /** 本期额度（周期包）；无周期字段的账号为 null。 */
+  cycle?: CreditCycle | null;
   resources?: CreditResource[];
   error?: string;
   /**
@@ -1140,6 +1155,10 @@ export interface CreditStatsSummary {
 export interface CreditStatsDailyPoint {
   date: string;
   usage: number;
+  /** 余额回升（签到 / 活动 / 返还）—— 快照差值口径；旧后端缺省 ⇒ 0。 */
+  income?: number;
+  /** 跨日减少（过期或前一晚用量），**不计入 usage**，仅作提示。 */
+  carry?: number;
   /** 官方用量按模型聚合（全量，不受请求明细条数限制）；本地观察口径下为空 */
   models?: { model: string; requestCount: number; credit: number }[];
 }
@@ -1185,7 +1204,28 @@ export interface CreditStatsCheckinEvent {
   amount?: number | null;
 }
 
-export type CreditStatsEvent = CreditStatsUsageEvent | CreditStatsCheckinEvent;
+/** 余额回升事件：把「+500 月初基础额度」这类入账归因到具体资源包。 */
+export interface CreditStatsIncomeEvent {
+  kind: "income";
+  ts: number;
+  date: string;
+  accountId: string;
+  accountName: string;
+  amount: number;
+  /** 拆解：哪个包涨了多少（旧快照没有资源包明细时只有一条 `name: null`）。 */
+  sources?: {
+    name: string | null;
+    code?: string;
+    amount: number;
+    total?: number | null;
+    expireAt?: number | null;
+  }[];
+}
+
+export type CreditStatsEvent =
+  | CreditStatsUsageEvent
+  | CreditStatsCheckinEvent
+  | CreditStatsIncomeEvent;
 
 export type CreditOfficialUsageStatus = "complete" | "partial" | "unavailable";
 

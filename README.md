@@ -215,7 +215,7 @@ buddy-switch version      # 版本号
 | **账号** | 卡片 / 表格双视图、程序位切换、扫码或设备码登录、本机导入、签到、回收站（30 天）、客户端限流台账（WorkBuddy 专有） |
 | **用量** | 一个工作台三个视图：趋势 · 会话 · 积分；参数条只有一条（时间范围 + 作用域） |
 | **会话** | 同一份会话在各账号的副本：谁落后、谁分叉、同步给谁（**仅 WorkBuddy**） |
-| **设置** | 九个分区：通用 · 账号与登录 · 签到与积分 · 网关 · 计划任务 · 客户端 · 权限与诊断 · 日志 · 备份与恢复 |
+| **设置** | 八个分区：通用 · 账号与登录 · 签到与积分 · 计划任务 · 客户端 · 权限与诊断 · 日志 · 备份与恢复 |
 
 ### 用量工作台
 
@@ -316,7 +316,6 @@ npm run check:api     # 只校验前端 API 契约
 ```
 crates/
   buddy-switch-core/     # 账号、认证、OAuth、进程、切换、会话、签到、区域、Trae / Qoder 模块
-  buddy-switch-gateway/  # OpenAI / Anthropic 兼容网关
   buddy-switch-server/   # HTTP server + CLI（axum API + rust-embed 内嵌前端）
 src-tauri/               # 桌面宿主（Tauri command 薄包装 + 托盘）
 src/                     # 前端：components / pages / lib / locales
@@ -335,7 +334,6 @@ src/                     # 前端：components / pages / lib / locales
 ## 致谢
 
 - **[changexbc/workbuddy-switch](https://github.com/changexbc/workbuddy-switch)**（MIT）—— 账号数据格式、多账号切换、积分与 Token 统计的实现基础。
-- **[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)** —— 把模型额度封装成 OpenAI 兼容接口的思路。
 
 相关名称与商标归各自权利人所有。
 

@@ -397,29 +397,29 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
   /** 当前（剩余）积分 —— 与原型 `a.credits` 同义。 */
   const metricCreditCurrent =
     credit?.ok && typeof credit.totalRemaining === "number" ? credit.totalRemaining : null;
-  const metricCreditTotal =
-    credit?.ok && metricResources.length > 0
-      ? metricResources.reduce((sum, resource) => sum + (Number.isFinite(resource.total) ? resource.total : 0), 0)
-      : null;
   /** 「最后使用」：仅当有真实的 `lastUsedAt`（epoch 毫秒）才渲染该项；否则整项省略。 */
   const lastUsedAt = typeof account.lastUsedAt === "number" && account.lastUsedAt > 0 ? account.lastUsedAt : null;
 
   const lastUsedRelative = formatRelativeTime(lastUsedAt, t);
+  /* 视觉重心：当前积分一个大数字 + 「N 个积分包」。
+     早先积分混在 11.5px 的小字指标行里（「积分 4,372.41/4,441」），
+     卡片一眼看过去全是状态标签，找不到主数字。 */
+  const creditHeadline =
+    metricCreditCurrent !== null ? (
+      <div className="flex min-w-0 items-baseline gap-2 pt-0.5">
+        <span className="text-[22px] font-semibold leading-none tabular-nums tracking-tight">
+          {formatCredits(metricCreditCurrent)}
+        </span>
+        {metricResources.length > 0 ? (
+          <span className="truncate text-[11px] text-muted-foreground">
+            {t("wbAccounts.card.packageCount", { n: metricResources.length })}
+          </span>
+        ) : null}
+      </div>
+    ) : null;
+
   const metricsRow = (
     <div className="flex min-w-0 gap-[14px] text-[11.5px] text-muted-foreground">
-      <span>
-        {t("wbAccounts.card.metric.credits")}{" "}
-        {metricCreditCurrent === null ? (
-          <b className="font-semibold tabular-nums text-foreground">—</b>
-        ) : (
-          <>
-            <b className="font-semibold tabular-nums text-foreground">
-              {formatCredits(metricCreditCurrent)}
-            </b>
-            {metricCreditTotal === null ? "" : `/${formatCredits(metricCreditTotal)}`}
-          </>
-        )}
-      </span>
       <span className="inline-flex items-center gap-1">
         {t("wbAccounts.card.metric.todayTokens")}{" "}
         {todayTokens ? (
@@ -893,6 +893,7 @@ const workbuddyControl = workbuddyActive ? (
       <section className="flex min-w-0 flex-1 flex-col">
         {/* ★ 指标行（原型 `.acct-metrics` :2510）：徽章之下、积分明细之上的一行小字。
             始终渲染 —— 积分未就绪时显示「—」，不闪不藏。 */}
+        {creditHeadline}
         {metricsRow}
         {creditLoading ? (
           <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{t("wbAccounts.card.loadingCredits")}</div>

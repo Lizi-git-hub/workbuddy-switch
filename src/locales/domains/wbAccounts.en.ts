@@ -103,6 +103,7 @@ export const en = {
   //    say "not supported yet", **NOT** "client not detected" (the latter sends users to install
   //    something that still won't work).
   "wbAccounts.program.plannedHint": "Not supported yet",
+  "wbAccounts.card.packageCount": "{n} credit packages",
   "wbAccounts.card.unnamed": "Unnamed account",
   "wbAccounts.card.checkedIn": "Checked in",
   "wbAccounts.card.notCheckedIn": "Not checked in today",

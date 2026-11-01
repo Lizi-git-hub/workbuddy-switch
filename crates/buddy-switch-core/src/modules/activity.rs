@@ -472,7 +472,7 @@ pub async fn run_activity_cycle_for(region: Region) -> Value {
             .unwrap_or("")
             .to_string();
         // N 条共用同一 conversationId（同会话多轮），requestId 各条独立。
-        let cid = format!("wb2api-{}", now_ms());
+        let cid = format!("wb-switch-{}", now_ms());
         let mut reported = 0u32;
         for i in 1..=count {
             let rid = format!("{cid}-r{i}");
@@ -700,16 +700,16 @@ mod tests {
 
     #[test]
     fn report_event_carries_required_identity_fields() {
-        let ev = build_report_event("wb2api-1", "wb2api-1-r1", "uid-9", 1_700_000_000_000);
+        let ev = build_report_event("wb-switch-1", "wb-switch-1-r1", "uid-9", 1_700_000_000_000);
         assert_eq!(ev["eventCode"], "chat_request_send");
         assert_eq!(ev["mode"], "craft");
         assert_eq!(ev["userId"], "uid-9");
-        assert_eq!(ev["conversationId"], "wb2api-1");
-        assert_eq!(ev["requestId"], "wb2api-1-r1");
+        assert_eq!(ev["conversationId"], "wb-switch-1");
+        assert_eq!(ev["requestId"], "wb-switch-1-r1");
         assert_eq!(ev["requestModelId"], "deepseek-v4-flash");
         assert_eq!(ev["requestModelName"], "DeepSeek V4 Flash");
-        assert_eq!(ev["rootRequestId"], "wb2api-1");
-        assert_eq!(ev["parentConversationId"], "wb2api-1");
+        assert_eq!(ev["rootRequestId"], "wb-switch-1");
+        assert_eq!(ev["parentConversationId"], "wb-switch-1");
         assert_eq!(ev["inputLength"], 12);
     }
 }

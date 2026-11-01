@@ -452,7 +452,10 @@ function RegionPanel({ region }: { region: Region }) {
 
   async function batchRefresh() {
     if (batchBusy) return;
-    const ids = accounts.filter((a) => selectedKeys.has(selectionKey(a.id))).map((a) => a.id);
+    /* ⚠️ 刷新**不按选区过滤**：它是「把全部账号的积分/签到状态/今日 Token 重取一遍」。
+       早先只刷选中的，0 选中直接 return —— 表现为「必须先全选才能刷新」。
+       选区只控制签到 / 导出 / 删除这三个真正针对选中项的动作。 */
+    const ids = accounts.map((a) => a.id);
     if (ids.length === 0) return;
     setBatchBusy(true);
     try {

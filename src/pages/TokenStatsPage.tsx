@@ -221,7 +221,17 @@ function TrendView({
   const [dailyRange, setDailyRange] = useState<UsageWindow>({ kind: "month" });
   const modelColumns = useMemo(() => {
     let dailyKeys = usageWindowKeys(dailyRange);
-    if (dailyKeys.length < 7) {
+    if (dailyRange.kind === "month") {
+      /* 「本月」在月初只有一天；若像以前那样**向前**补 7 天，轴就变成上周的日期，
+         看起来和「本周」一模一样。改为**向后**铺满整月 —— 未来日期留空，
+         语义才是「本月」，且会随日子推进自然填满。 */
+      const [year, month] = dailyKeys[0].split("-").map(Number);
+      const daysInMonth = new Date(year, month, 0).getDate();
+      dailyKeys = Array.from({ length: daysInMonth }, (_, index) =>
+        `${year}-${String(month).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
+      );
+    } else if (dailyRange.kind === "today" && dailyKeys.length < 7) {
+      /* 只有「今天」才补足一周：单根柱子读不出节奏，而补足到过去几天不会误读成别的档位。 */
       const endTime = new Date(`${dailyKeys[dailyKeys.length - 1]}T00:00:00`).getTime();
       dailyKeys = Array.from({ length: 7 }, (_, index) =>
         dateKey(new Date(endTime - (6 - index) * 86_400_000)),
@@ -333,10 +343,34 @@ function TrendView({
   const peak = Math.max(0, ...dailyTotals);
   const average = Math.round(total / usageWindowDays(viewWindow));
 
-  const rangeRecords = useMemo(() => {
+  /* ★ 窗口内的分项合计。
+     `source.summary` 是 **全量**（`mergeSources` 不按窗口切），而总量 / 日均 / 峰值 /
+     请求数都读窗口值 —— 早先「输入 / 输出 / 命中率」三张卡直接读 `source.summary`，
+     于是同一排卡片里并存两套口径（实测「输入 1.11 亿」比「总量 3324 万」还大）。
+     这里统一从 `daily` 按窗口重算，与请求数同一个数据源。 */
+  const windowSummary = useMemo(() => {
     const inWindow = new Set(keys);
-    return source.daily.reduce((sum, point) => (inWindow.has(point.key) ? sum + point.records : sum), 0);
+    let input = 0;
+    let output = 0;
+    let cacheRead = 0;
+    let cacheWrite = 0;
+    let uncachedInput = 0;
+    let records = 0;
+    let credit = 0;
+    for (const point of source.daily) {
+      if (!inWindow.has(point.key)) continue;
+      input += point.input ?? 0;
+      output += point.output ?? 0;
+      cacheRead += point.cacheRead ?? 0;
+      cacheWrite += point.cacheWrite ?? 0;
+      uncachedInput += point.uncachedInput ?? 0;
+      records += point.records ?? 0;
+      credit += point.credit ?? 0;
+    }
+    return { input, output, cacheRead, cacheWrite, uncachedInput, records, credit };
   }, [source.daily, keys]);
+
+  const rangeRecords = windowSummary.records;
   const filtered = source.summary.records > 0 && rangeRecords === 0 && gatewayTokens === 0;
 
   /* 模型占比：**按单本账各画一个环**（跨账本合并占比的分母含重复计数，是假的）。 */
@@ -430,7 +464,7 @@ function TrendView({
     ledger === "gateway" ? gatewaySlices.length : ledger === "client" ? clientSlices.length : clientSlices.length + gatewaySlices.length;
 
   /* 缓存命中率的分母（分子 = cacheRead）：与后端 `recompute_cache_hit_rate` 同式。 */
-  const cacheHitDenominator = source.summary.cacheRead + source.summary.uncachedInput;
+  const cacheHitDenominator = windowSummary.cacheRead + windowSummary.uncachedInput;
 
   /* 等效花费：按「模型 × 单价表」折算成人民币。
      后端的 input 已含缓存命中，所以普通输入要减掉 read，否则缓存部分被算两次。 */
@@ -440,13 +474,18 @@ function TrendView({
     {
       icon: ArrowDownToLine,
       label: t("wbStats.usage.trend.input"),
-      value: compactTokens(source.summary.uncachedInput),
-      hint: t("wbStats.usage.trend.inputHint"),
+      /* 显示**含缓存读**的输入：后端 `total = input + output + write`，其中 `input`
+         已含缓存读。若这里给 `uncachedInput`，「输入 + 输出」永远加不出总量
+         （实测 128 万 + 1257 万 ≠ 3324 万）。缓存部分在 hint 里单独标出。 */
+      value: compactTokens(windowSummary.input),
+      hint: t("wbStats.usage.trend.inputHintCached", {
+        cached: compactTokens(windowSummary.cacheRead),
+      }),
     },
     {
       icon: ArrowUpFromLine,
       label: t("wbStats.usage.trend.output"),
-      value: compactTokens(source.summary.output),
+      value: compactTokens(windowSummary.output),
       hint: t("wbStats.usage.trend.outputHint"),
     },
     {
@@ -457,7 +496,7 @@ function TrendView({
          （cacheRead / uncachedInput）一直是健全的。直接现算，与模型图例同式。 */
       value:
         cacheHitDenominator > 0
-          ? `${((source.summary.cacheRead / cacheHitDenominator) * 100).toFixed(1)}%`
+          ? `${((windowSummary.cacheRead / cacheHitDenominator) * 100).toFixed(1)}%`
           : "—",
       hint: t("wbStats.usage.trend.cacheRateHint"),
     },

@@ -495,10 +495,14 @@ export function sessionPoints(source: TokenStatsSource, window: UsageWindow): Se
 }
 
 export function creditDailyBars(stats: CreditStatistics, window: UsageWindow): CreditDailyBar[] {
-  /* WB 的入账**不可得**（`events` 无金额字段）⇒ `inAmt` 恒 0，渲染层据此只画消耗侧。 */
-  const byDate = new Map(stats.daily.map((point) => [point.date, point.usage]));
+  /* 只出**消耗**一侧。入账（余额回升）是快照差值的净额，扣掉同期消耗后既不准也无法归因，
+     展示它只会误导 —— 已从界面与计算中移除。跨日减少在 `carry` 里，同样不进消耗。 */
+  const usageByDate = new Map(stats.daily.map((point) => [point.date, point.usage]));
   return creditBars(
-    usageWindowKeys(window).map((key) => ({ date: key, outAmt: byDate.get(key) ?? 0 })),
+    usageWindowKeys(window).map((key) => ({
+      date: key,
+      outAmt: usageByDate.get(key) ?? 0,
+    })),
   );
 }
 

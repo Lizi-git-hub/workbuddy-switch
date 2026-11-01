@@ -21,7 +21,7 @@ use crate::timeutil;
 /// 内置默认提示词（`custom` 模式未指定 `prompt.file` 时使用）。
 ///
 /// 内容移植自参考实现 `internal/prompt/defaultprompt.md`（MIT License,
-/// 原始出处 https://github.com/Sliverkiss/workbuddy2api）。
+/// 。
 pub const BUILTIN_SYSTEM_PROMPT: &str = include_str!("default_prompt.md");
 
 /// 降级提示词：中性、不引导模型，仅保证请求可被受理。

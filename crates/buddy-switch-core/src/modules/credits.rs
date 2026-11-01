@@ -114,6 +114,12 @@ fn earliest_timestamp_ms(raw: &Value, keys: &[&str]) -> Option<i64> {
         .min()
 }
 
+/// 取**第一个**能解析的时间戳（`earliest_timestamp_ms` 取最早，两者语义不同：
+/// 到期时间要取最早的那个包，周期起止要取本包自己的字段）。
+fn first_timestamp_ms(raw: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| parse_timestamp_ms(raw.get(*key)))
+}
+
 fn value_at_path<'a>(mut current: &'a Value, path: &[&str]) -> Option<&'a Value> {
     for key in path {
         current = current.get(*key)?;
@@ -261,6 +267,21 @@ fn resource_summary(raw: &Value, now: i64) -> Value {
         .and_then(|value| parse_number(Some(value)))
         .map(|value| value as i64);
 
+    /* 周期起止：`CycleCapacitySize` 那套字段是「本周期额度」，对应的就是
+       `CycleStartTime` / `CycleEndTime`。月度基础额度（如每月 +500）走的就是它 ——
+       有了这对时间戳，「本期额度 / 已用 / 何时重置」就不用靠差值猜。 */
+    let cycle_start_at = first_timestamp_ms(
+        raw,
+        &["CycleStartTime", "cycleStartTime", "PeriodStartTime", "periodStartTime"],
+    );
+    let cycle_end_at = first_timestamp_ms(
+        raw,
+        &["CycleEndTime", "cycleEndTime", "PeriodEndTime", "periodEndTime"],
+    )
+    /* 兜底：月度包的周期结束时间通常就等于到期时间。接口若只给 `ExpiredTime`，
+       用它顶上 —— 宁可显示「到期日」，也不要整行周期信息消失。 */
+    .or(expire_at);
+
     json!({
         "packageCode": first_value(raw, &["PackageCode", "packageCode"]),
         "packageName": first_value(raw, &["PackageName", "packageName"]),
@@ -271,6 +292,8 @@ fn resource_summary(raw: &Value, now: i64) -> Value {
         "expireAt": expire_at,
         "expired": expired,
         "expiringSoon": expiring_soon,
+        "cycleStartAt": cycle_start_at,
+        "cycleEndAt": cycle_end_at,
     })
 }
 
@@ -711,6 +734,49 @@ fn credit_result(account: &Value, resources: Vec<Value>, now: i64) -> Value {
         .filter(|resource| resource.get("expired").and_then(|value| value.as_bool()) == Some(true))
         .filter_map(|resource| resource.get("remaining").and_then(|value| value.as_f64()))
         .sum();
+    /* 本期额度（周期包）：取有周期结束时间、且 `total` 最大的那个包 ——
+       月度基础额度通常是容量最大的那个。没有周期字段的旧接口 ⇒ null。 */
+    /* 周期包的选择顺序（实测同一账号同时存在多个 500 的包）：
+       ① 名字像「月度基础额度」的（体验版 / 基础 / 免费 / 月度）—— 这类才是每月重置的那个；
+       ② 否则取容量最大的周期包。 */
+    let looks_monthly = |resource: &Value| -> bool {
+        let name = resource
+            .get("packageName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        ["体验", "基础", "免费", "月度", "monthly", "basic", "free", "trial"]
+            .iter()
+            .any(|needle| name.contains(needle))
+    };
+    let cycle = resources
+        .iter()
+        .filter(|resource| {
+            resource
+                .get("cycleEndAt")
+                .map(|value| !value.is_null())
+                .unwrap_or(false)
+        })
+        .max_by(|left, right| {
+            let by_kind = looks_monthly(left).cmp(&looks_monthly(right));
+            if by_kind != std::cmp::Ordering::Equal {
+                return by_kind;
+            }
+            let a = left.get("total").and_then(Value::as_f64).unwrap_or(0.0);
+            let b = right.get("total").and_then(Value::as_f64).unwrap_or(0.0);
+            a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|resource| {
+            json!({
+                "name": resource.get("packageName").cloned().unwrap_or(Value::Null),
+                "total": resource.get("total").cloned().unwrap_or(Value::Null),
+                "used": resource.get("used").cloned().unwrap_or(Value::Null),
+                "remaining": resource.get("remaining").cloned().unwrap_or(Value::Null),
+                "startAt": resource.get("cycleStartAt").cloned().unwrap_or(Value::Null),
+                "endAt": resource.get("cycleEndAt").cloned().unwrap_or(Value::Null),
+            })
+        });
+
     let account_id = account.get("id").cloned().unwrap_or(Value::Null);
     let account_name = account_display_name(account);
     if let Some(account_id) = account_id.as_str() {
@@ -719,6 +785,7 @@ fn credit_result(account: &Value, resources: Vec<Value>, now: i64) -> Value {
             &account_name,
             total_capacity,
             total_remaining,
+            &resources,
         );
     }
 
@@ -734,6 +801,7 @@ fn credit_result(account: &Value, resources: Vec<Value>, now: i64) -> Value {
         "soonestExpireAt": soonest_expire_at,
         "expiringSoon": expiring_soon,
         "expired": expired,
+        "cycle": cycle,
         "resources": resources,
     })
 }

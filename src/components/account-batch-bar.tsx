@@ -29,7 +29,28 @@ export function AccountBatchBar({
   onClear,
 }: AccountBatchBarProps) {
   const t = useT();
-  if (selectedCount <= 0) return null;
+
+  /* 刷新是**全量**动作，与选区无关。
+     早先这里在 0 选中时直接 `return null`，整条消失、刷新按钮跟着不见 ——
+     用户被迫「先全选才能刷新」。没有选中时保留一个轻量入口。 */
+  if (selectedCount <= 0) {
+    if (!onRefresh) return null;
+    return (
+      <div className="mb-3 flex min-w-0 w-full items-center gap-2.5 px-1">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 rounded-full px-3 text-xs"
+          disabled={busy}
+          onClick={onRefresh}
+        >
+          {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+          {t("shared.batch.refreshAll")}
+        </Button>
+        <span className="text-[11px] text-muted-foreground">{t("shared.batch.refreshAllHint")}</span>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -49,7 +70,7 @@ export function AccountBatchBar({
             onClick={onRefresh}
           >
             {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-            {t("shared.batch.refresh")}
+            {t("shared.batch.refreshAll")}
           </Button>
         )}
         {onCheckin && (

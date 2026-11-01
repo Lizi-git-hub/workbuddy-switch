@@ -779,6 +779,8 @@ export const zh = {
   "shared.toolbar.viewTableDisabled": "窗口太窄，表格视图不可用；请加宽窗口后重试",
   "shared.toolbar.selectAll": "全选",
   "shared.toolbar.deselectAll": "取消全选",
+  "shared.batch.refreshAll": "刷新全部账号",
+  "shared.batch.refreshAllHint": "积分、签到状态与今日 Token 一起重取，无需先选中",
 
   "shared.addDrawer.title": "添加账号",
   "shared.addDrawer.scopePrefix": "当前作用域：",

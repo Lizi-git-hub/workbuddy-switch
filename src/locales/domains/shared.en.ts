@@ -748,6 +748,8 @@ export const en = {
   "shared.toolbar.viewTableDisabled": "Window is too narrow for the table view; widen it and try again",
   "shared.toolbar.selectAll": "Select all",
   "shared.toolbar.deselectAll": "Deselect all",
+  "shared.batch.refreshAll": "Refresh all accounts",
+  "shared.batch.refreshAllHint": "Refreshes credits, check-in status and today's tokens for every account",
 
   // =====================================================================
   // ---- "Add account" drawer (components/add-account-drawer.tsx, shared) ----
