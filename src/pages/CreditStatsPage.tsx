@@ -60,6 +60,7 @@ const REFRESH_INTERVAL_MINUTES = Math.round(CREDIT_REFRESH_INTERVAL_MS / 60_000)
 export default function CreditStatsPage({
   viewWindow,
   combineAll,
+  refreshSeq = 0,
   ledger = "client",
 }: UsageViewProps & { ledger?: UsageLedger }) {
   const t = useT();
@@ -82,6 +83,14 @@ export default function CreditStatsPage({
   );
   const wbAccounts = useAccountsStore((state) => state.accounts);
   const globalAccounts = useAccountsStore((state) => state.global.accounts);
+  /* 页头「刷新统计」：序号变化 ⇒ 强制刷新（refresh = true），
+     不能只靠重挂载 —— 重挂载会命中 `statisticsCache` 里的旧数据。 */
+  useEffect(() => {
+    if (refreshSeq <= 0) return;
+    void load(region, true, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSeq]);
+
   useEffect(() => {
     if (wbAccounts.length === 0 && globalAccounts.length === 0) {
       void fetchAllRegions().catch(() => undefined);

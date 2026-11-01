@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { AccountMoreMenu } from "@/components/account-more-menu";
-import { AccountCard, accountIdentity, accountDisplayName, accountSubtitle, formatCredits, formatCreditExpiry, formatTodayTokens, todayTokensBreakdown, type GuideTarget } from "@/components/account-card";
+import { AccountCard, accountIdentity, accountDisplayName, accountSubtitle, formatCredits, formatCreditExpiry, type GuideTarget } from "@/components/account-card";
 import { REFRESH_DONE_LABEL, useAccountRefreshBusy, type AccountRefreshKind } from "@/lib/account-refresh";
 import { isWorkbuddyCurrent } from "@/lib/account-current";
 import { AccountsTableAvatar } from "@/components/account-list-parts";
@@ -73,7 +73,6 @@ import { scopeOf } from "@/lib/scope";
 import { useRefreshAction } from "@/lib/use-refresh-action";
 import type {
   AccountMeta,
-  AccountTokenTodayEntry,
   AppStatus,
   CheckinConfig,
   CheckinLog,
@@ -256,14 +255,14 @@ function RegionPanel({ region }: { region: Region }) {
   /** 账号 id -> 今日旅行状态（undefined=查询中/未知） */
   const [travelMap, setTravelMap] = useState<Record<string, TravelStatus>>({});
   /**
-   * 「今日 Token」按账号聚合（`get_account_token_today`）：`uid -> 明细`。
+   * 「今日消耗积分」：`account.id -> 今日消耗`（官方口径 `officialUsage.accounts[].usageToday`）。
    *
-   * ⚠️ 用 **Map** 而非缺省对象是刻意的：`accounts` 里**缺席**某 uid = 「今日无记录 / 未知」，
-   * 与「有一行值全 0（真实 0）」是两件事（诚实边界）。`map.get(uid)` 为 `undefined` 即缺席。
+   * ⚠️ 用 **Map** 而非缺省对象是刻意的：**缺席** = 官方还没采到 / 该账号不在返回里 =
+   * 未知（渲染「—」），与「今日确实消耗 0 分」是两件事。
+   * 也不再显示「今日 Token」—— 那个数把上下文重读的缓存也算进输入，长会话能虚高两个
+   * 数量级，与「用量」页的输入合计天然对不上（用户已多次质疑），索性不摆。
    */
-  const [tokenTodayMap, setTokenTodayMap] = useState<Map<string, AccountTokenTodayEntry>>(new Map());
-  /** 网关日志已到保留上限 ⇒ 网关部分为下界（「今日 Token」渲染 `≥N`）。 */
-  const [tokenTodayTruncated, setTokenTodayTruncated] = useState(false);
+  const [todayCreditMap, setTodayCreditMap] = useState<Map<string, number>>(new Map());
   const [codebuddyCli, setCodebuddyCli] = useState<CodeBuddyCliStatus | null>(null);
   const [codebuddyCliSwitchingId, setCodebuddyCliSwitchingId] = useState<string | null>(null);
   const [codebuddyCnIde, setCodebuddyCnIde] = useState<CodeBuddyCnIdeStatus | null>(null);
@@ -452,7 +451,7 @@ function RegionPanel({ region }: { region: Region }) {
 
   async function batchRefresh() {
     if (batchBusy) return;
-    /* ⚠️ 刷新**不按选区过滤**：它是「把全部账号的积分/签到状态/今日 Token 重取一遍」。
+    /* ⚠️ 刷新**不按选区过滤**：它是「把全部账号的积分/签到状态/今日消耗重取一遍」。
        早先只刷选中的，0 选中直接 return —— 表现为「必须先全选才能刷新」。
        选区只控制签到 / 导出 / 删除这三个真正针对选中项的动作。 */
     const ids = accounts.map((a) => a.id);
@@ -461,8 +460,8 @@ function RegionPanel({ region }: { region: Region }) {
     try {
       await refreshCredits(ids, { region });
       await loadTravelMap(ids);
-      /* 显式刷新 ⇒ 强制重算「今日 Token」（绕过后端 TTL 闸门）。 */
-      await loadTokenToday(true);
+      /* 显式刷新 ⇒ 强制重采官方「今日消耗积分」（绕过后端 TTL 闸门）。 */
+      await loadTodayCredit(true);
       toast.success(t("wbAccounts.toast.creditsRefreshed"));
     } finally {
       setBatchBusy(false);
@@ -745,31 +744,35 @@ function RegionPanel({ region }: { region: Region }) {
     void ensureCredits(accounts.map((account) => account.id), region);
   }, [accounts, ensureCredits, region]);
 
-  const tokenTodayGenRef = useRef(0);
-  const loadTokenToday = useCallback(
+  const todayCreditGenRef = useRef(0);
+  const loadTodayCredit = useCallback(
     async (force: boolean) => {
       /* 代次：region 变化后晚到的旧响应**不得**覆盖新结果（否则又变成张冠李戴）。 */
-      const gen = (tokenTodayGenRef.current += 1);
-      const current = () => gen === tokenTodayGenRef.current;
+      const gen = (todayCreditGenRef.current += 1);
+      const current = () => gen === todayCreditGenRef.current;
       try {
-        const res = await api.getAccountTokenToday(region, force);
+        const stats = await api.getCreditStatistics(force, region);
         if (!current()) return;
-        const map = new Map<string, AccountTokenTodayEntry>();
-        for (const entry of res.accounts ?? []) map.set(entry.uid, entry);
-        setTokenTodayMap(map);
-        setTokenTodayTruncated(Boolean(res.gatewayTruncated));
+        const map = new Map<string, number>();
+        for (const entry of stats.officialUsage?.accounts ?? []) {
+          /* `null` = 该账号官方读数不可用（未登录 / 采集失败）⇒ 不进 map ⇒ 渲染「—」。 */
+          if (entry.usageToday != null && Number.isFinite(entry.usageToday)) {
+            map.set(entry.accountId, entry.usageToday);
+          }
+        }
+        setTodayCreditMap(map);
       } catch {
         if (!current()) return;
-        setTokenTodayMap(new Map());
-        setTokenTodayTruncated(false);
+        setTodayCreditMap(new Map());
       }
     },
     [region],
   );
 
   useEffect(() => {
-    void loadTokenToday(false);
-  }, [loadTokenToday, accounts.length]);
+    if (!accounts.length) return;
+    void loadTodayCredit(false);
+  }, [loadTodayCredit, accounts.length]);
 
   async function onRecheck() {
     await Promise.all([refreshRegionStatus(region), reconcileAccounts(region)]);
@@ -901,8 +904,8 @@ function RegionPanel({ region }: { region: Region }) {
           if (kind === "credits") {
             await refreshCredits([a.id], { region });
           } else if (kind === "tokens") {
-            /* `force=true`：用户显式点了刷新，就绕过后端「距上次扫描不足 TTL」的闸门。 */
-            await loadTokenToday(true);
+            /* `force=true`：用户显式点了刷新，就绕过后端官方用量的 TTL 缓存。 */
+            await loadTodayCredit(true);
           } else if (kind === "checkin") {
             const next = await fetchTodayCheckinMap([a.id], region);
             if (Object.keys(next).length > 0) setCheckinMap((prev) => ({ ...prev, ...next }));
@@ -915,7 +918,7 @@ function RegionPanel({ region }: { region: Region }) {
         }
       });
     },
-    [refreshBusy, refreshCredits, region, loadTokenToday, reconcileAccounts, t],
+    [refreshBusy, refreshCredits, region, loadTodayCredit, reconcileAccounts, t],
   );
 
   async function onRefresh(a: AccountMeta) {
@@ -946,14 +949,14 @@ function RegionPanel({ region }: { region: Region }) {
       } catch {
         /* ignore */
       }
-      /* 显式刷新 ⇒ 强制重算「今日 Token」（绕过后端 TTL 闸门）。 */
-      void loadTokenToday(true);
+      /* 显式刷新 ⇒ 强制重采官方「今日消耗积分」（绕过后端 TTL 闸门）。 */
+      void loadTodayCredit(true);
     } catch (e) {
       toast.error(t("wbAccounts.toast.tokenRefreshFail"), { description: api.asError(e) });
     }
   }
 
-  /** 刷新按钮：先跑一轮批量签到并重查今日签到状态，再强制刷新全部积分与「今日 Token」。 */
+  /** 刷新按钮：先跑一轮批量签到并重查今日签到状态，再强制刷新全部积分与「今日消耗」。 */
   async function onRefreshCredits() {
     if (!accounts.length || refreshingCredits || checkinAllRunning) return;
     setCheckinAllRunning(true);
@@ -984,8 +987,8 @@ function RegionPanel({ region }: { region: Region }) {
       }
       await refreshCredits(accounts.map((account) => account.id), { region });
       await loadTravelMap(accounts.map((account) => account.id));
-      /* 显式刷新 ⇒ 强制重算「今日 Token」（绕过后端 TTL 闸门）。 */
-      await loadTokenToday(true);
+      /* 显式刷新 ⇒ 强制重采官方「今日消耗积分」（绕过后端 TTL 闸门）。 */
+      await loadTodayCredit(true);
       toast.success(t("wbAccounts.toast.creditsRefreshed"));
     } finally {
       setCheckinAllRunning(false);
@@ -1478,19 +1481,18 @@ function RegionPanel({ region }: { region: Region }) {
       ),
     },
     {
-      /* 「今日 Token」列：与卡片指标行**同一份**诚实实现（`formatTodayTokens`）——
-         账号缺席 ⇒ 「—」（绝不当 0）；网关被裁剪 ⇒ 下界 `≥N`（`title` 说明下界口径）。 */
-      key: "todayTokens",
-      header: t("wbAccounts.table.todayTokens"),
+      /* 「今日消耗」列：官方积分口径（与卡片指标行**同一份**数据）——
+         账号缺席 / 官方读数不可用 ⇒ 「—」（绝不当 0）。 */
+      key: "todayCredit",
+      header: t("wbAccounts.table.todayCredit"),
       align: "right",
       render: (account) => {
-        const entry = account.uid ? tokenTodayMap.get(account.uid) : undefined;
+        const used = todayCreditMap.get(account.id);
         return (
-          <span
-            className={cn("tabular-nums", !entry && "text-muted-foreground")}
-            title={entry ? todayTokensBreakdown(entry, tokenTodayTruncated, t) : undefined}
-          >
-            {formatTodayTokens(entry, tokenTodayTruncated, t)}
+          <span className={cn("tabular-nums", used == null && "text-muted-foreground")}>
+            {used == null
+              ? "—"
+              : t("wbAccounts.card.metric.todayCreditValue", { value: formatCredits(used) })}
           </span>
         );
       },
@@ -1622,7 +1624,7 @@ function RegionPanel({ region }: { region: Region }) {
   const detailStats = useMemo<DetailStat[]>(() => {
     if (!detail) return [];
     const credit = creditMap[detail.id];
-    const todayEntry = detail.uid ? tokenTodayMap.get(detail.uid) : undefined;
+    const usedToday = todayCreditMap.get(detail.id);
     const checkedIn = checkinMap[detail.id];
     const expired = detail.expiresAt != null && detail.expiresAt < Date.now();
     const credBad = expired || Boolean(detail.needsRelogin);
@@ -1631,6 +1633,11 @@ function RegionPanel({ region }: { region: Region }) {
       credit?.soonestExpireAt != null
         ? Math.max(1, Math.ceil((credit.soonestExpireAt - Date.now()) / 86_400_000))
         : 0;
+    /* 「今日消耗」的副标题：拿不到官方读数时说清原因，不摆一个含义不明的 0。 */
+    const todayCreditSub =
+      usedToday == null
+        ? t("wbAccounts.card.metric.todayCreditUnknown")
+        : t("wbAccounts.card.metric.todayCreditSub");
     return [
       {
         key: "credits",
@@ -1647,10 +1654,14 @@ function RegionPanel({ region }: { region: Region }) {
         refreshKind: "credits",
       },
       {
-        key: "tokens",
-        label: t("shared.stat.tokens"),
-        valueText: formatTodayTokens(todayEntry, tokenTodayTruncated, t),
-        refreshKind: "tokens",
+        key: "todayCredit",
+        label: t("wbAccounts.table.todayCredit"),
+        valueText:
+          usedToday == null
+            ? "—"
+            : t("wbAccounts.card.metric.todayCreditValue", { value: formatCredits(usedToday) }),
+        subText: todayCreditSub,
+        refreshKind: "credits",
       },
       {
         key: "checkin",
@@ -1671,7 +1682,7 @@ function RegionPanel({ region }: { region: Region }) {
         refreshKind: "credential",
       },
     ];
-  }, [detail, creditMap, tokenTodayMap, tokenTodayTruncated, checkinMap, t]);
+  }, [detail, creditMap, todayCreditMap, checkinMap, t]);
 
   const detailPacks: DetailPack[] =
     detail && detailCredit?.ok
@@ -2131,8 +2142,7 @@ function RegionPanel({ region }: { region: Region }) {
                               }}
                               todayCheckedIn={checkinMap[a.id]}
                               travelStatus={travelMap[a.id]}
-                              todayTokens={a.uid ? tokenTodayMap.get(a.uid) : undefined}
-                              todayTokensTruncated={tokenTodayTruncated}
+                              todayCredit={todayCreditMap.get(a.id) ?? null}
                               credit={creditMap[a.id]}
                               creditLoading={creditLoadingMap[a.id]}
                               creditPriority={a.id === priorityAccountId}

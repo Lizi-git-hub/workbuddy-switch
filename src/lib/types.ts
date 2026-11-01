@@ -60,6 +60,14 @@ export interface AccountTokenTodayEntry {
   clientIn: number;
   /** 客户端自身 CLI 用量的输出 token 数。 */
   clientOut: number;
+  /**
+   * `clientIn` 里**属于缓存命中**的部分（上游 `input_tokens` 已含它）。
+   *
+   * 长会话每轮都会把整段上下文重读一次，累加后的 `clientIn` 可以比用户「真的
+   * 生成了多少」高两个数量级（实测 98%+ 是缓存命中）。界面若要给「今日新增」，
+   * 必须拿 `clientIn - clientCacheRead`，不要直接展示 `clientIn`。
+   */
+  clientCacheRead?: number;
   /** **经本网关**的输入 token 数。 */
   gatewayIn: number;
   /** 经本网关的输出 token 数。 */

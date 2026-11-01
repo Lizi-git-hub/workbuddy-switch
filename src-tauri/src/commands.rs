@@ -1729,14 +1729,14 @@ pub async fn get_account_token_today(
     force: Option<bool>,
 ) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
-    let force = force.unwrap_or(false);
+    /* `force` 由 token_stats 自己的扫描缓存（按文件 mtime）决定是否重扫，
+       这里不再单独驱动 token_daily 的增量账本。 */
+    let _ = force;
     tauri::async_runtime::spawn_blocking(move || {
-        token_daily::record_client_today(region, force);
-        token_daily::record_gateway_today(region);
-        token_daily::account_token_today(region)
+        token_stats::account_today_by_uid(region.into())
     })
-    .await
-    .map_err(|error| format!("统计今日 Token 失败: {error}"))
+        .await
+        .map_err(|error| format!("统计今日 Token 失败: {error}"))
 }
 
 /// POST /api/checkin —— 单账号立即签到（按 region）。

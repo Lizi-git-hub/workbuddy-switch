@@ -1805,18 +1805,13 @@ async fn api_set_account_group(Json(body): Json<Value>) -> Response {
     }
 }
 
-/// GET /api/account/token-today —— 逐账号「今日 Token」（网关 + 客户端两路，按 region）。
+/// GET /api/account/token-today —— 逐账号「今日 Token」（按 region）。
 ///
-/// 与 `src-tauri/src/commands.rs` 的同名命令**一一对应**（刻意不去重，两宿主行为必须一致）。
-///
-/// ⚠️ 两条诚实边界（由 core 保证，展示层负责如实呈现）：
-/// ① `force=1` 才重扫客户端 `projects` 目录下的 jsonl —— 该扫描要读 500+ 个文件（最大 ~18MB），
-///    故 core 侧有「今日已扫」闸门：不带 `force` 的重复调用只读缓存，不会每次轮询重扫；
-/// ② 网关那路受 `log_keep`（默认 200）截断 ⇒ 响应里的 `gatewayTruncated` 表示该数字只是**下界**，
-///    展示层须写成 `≥N` 并说明，不得当作完整总量。
-///    ⚠️ 判据是「**今日**部分可能被裁」而非「日志到过上限」：滚动窗口可能被昨天的流量顶满，
-///    而今天的条目全在（FIFO 裁剪）—— 那种情况下今日总量是**完整**的，不标 `true`
-///    （旧判据只看条数，会误报）。见 core `token_daily::gateway_log_truncated_today`。
+/// 与 `src-tauri/src/commands.rs` 的同名命令**一一对应**（刻意不去重，两宿主行为必须一致）：
+/// 数字统一取 `token_stats::account_today_by_uid`（与「用量 → 趋势」同一份扫描 + 副本去重），
+/// **不再**用 `token_daily` 的 session 累加账本 —— 那套会和趋势页对不上（历史上出现过
+/// 「单账号 7,441 万 > 全站合计 3,324 万」）。`record_*` 仍照旧执行，只为维护逐日趋势账本。
+/// 口径：`clientIn` 含缓存命中，另给 `clientCacheRead`，界面按「非缓存输入 + 输出」展示。
 async fn api_account_token_today(RawQuery(query): RawQuery) -> Response {
     let region = parse_region(query_value(query.as_deref(), "region").as_deref());
     let force = matches!(
@@ -1825,7 +1820,7 @@ async fn api_account_token_today(RawQuery(query): RawQuery) -> Response {
     );
     token_daily::record_client_today(region, force);
     token_daily::record_gateway_today(region);
-    json_ok(token_daily::account_token_today(region))
+    json_ok(token_stats::account_today_by_uid(region.into()))
 }
 
 /// GET /api/account/token-trend —— 网关**逐日**用量趋势（读 `token_daily` 90 天落库历史）。

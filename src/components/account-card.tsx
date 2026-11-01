@@ -12,7 +12,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 import { shouldOpenAccountDetail } from "@/lib/account-open-guard";
 import { ENCRYPTED_CREDENTIAL_REASON } from "@/lib/api";
-import { compactTokens, exactTokens } from "@/components/usage/format";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
 import {
@@ -77,50 +76,22 @@ export function formatCredits(value: number): string {
 }
 
 /**
- * 「今日 Token」的**诚实**展示串（卡片与表格**同一份**实现，避免两处口径漂移）。
+ * 「今日 Token」的**真实新增**量：非缓存输入 + 输出 + 缓存写（+ 已下线的网关两列）。
  *
- * 四条边界（见 `AccountTokenTodayResponse`）：
- * - `entry` 缺失 = 该账号今日**无记录 / 未知** ⇒ **「—」**（**绝不**当 0）；
- * - 出现在 `entry` 里的 `0` 是**真实 0**（`compactTokens(0)` = `"0"`）；
- * - `truncated`（网关日志的**今日**部分可能被裁）⇒ 网关部分是**下界** ⇒ 整串渲染成 **`≥N`**；
- * - 客户端 / 网关**两侧都非零** ⇒ 合计可能重复计数（两条独立记录），说明由明细
- *   （{@link todayTokensBreakdown}）带上 —— headline 只负责数字，不负责解释。
+ * ⚠️ **不要**直接用 `clientIn + clientOut` 当「今日用量」：上游 `input_tokens` 含
+ * 每次请求重读的整段上下文，长会话一天能累加出上亿，看着像「根本没消耗这么多」。
+ * 这里把缓存命中剔掉，只留真正新算进去的部分（{@link cacheReadOf} 仍可单独展示）。
  */
-export function formatTodayTokens(
-  entry: AccountTokenTodayEntry | null | undefined,
-  truncated: boolean,
-  t: Translate,
-): string {
-  if (!entry) return "—";
-  const total = entry.clientIn + entry.clientOut + entry.gatewayIn + entry.gatewayOut;
-  const value = compactTokens(total);
-  return truncated ? t("wbAccounts.card.metric.atLeast", { value }) : value;
+export function todayTokenNet(entry: AccountTokenTodayEntry): number {
+  const cacheRead = cacheReadOf(entry);
+  const freshInput = Math.max(0, entry.clientIn - cacheRead);
+  return freshInput + entry.clientOut + entry.gatewayIn + entry.gatewayOut;
 }
 
-export function todayTokensBreakdown(
-  entry: AccountTokenTodayEntry | null | undefined,
-  truncated: boolean,
-  t: Translate,
-): string {
-  if (!entry) return "";
-  const parts = [
-    t("wbAccounts.card.metric.todayTokensClient", {
-      input: exactTokens(entry.clientIn),
-      output: exactTokens(entry.clientOut),
-    }),
-    t("wbAccounts.card.metric.todayTokensGateway", {
-      input: exactTokens(entry.gatewayIn),
-      output: exactTokens(entry.gatewayOut),
-    }),
-  ];
-  // 只有一侧为 0 时，合计就是另一侧、没有歧义 ⇒ 不必加噪音。
-  const clientTotal = entry.clientIn + entry.clientOut;
-  const gatewayTotal = entry.gatewayIn + entry.gatewayOut;
-  if (clientTotal > 0 && gatewayTotal > 0) {
-    parts.push(t("wbAccounts.card.metric.todayTokensOverlap"));
-  }
-  if (truncated) parts.push(t("wbAccounts.card.metric.todayTokensTruncated"));
-  return parts.join(t("shared.punct.comma"));
+/** 今日输入中命中缓存的部分（旧后端缺字段时按 0 处理）。 */
+export function cacheReadOf(entry: AccountTokenTodayEntry): number {
+  const read = Number.isFinite(entry.clientCacheRead) ? (entry.clientCacheRead as number) : 0;
+  return Math.max(0, Math.min(read, entry.clientIn));
 }
 
 export function formatCreditExpiry(ts: number | null, t: Translate): string {
@@ -321,13 +292,13 @@ interface Props {
   /** 「更多 → 编辑备注」：打开抽屉并进入编辑态。 */
   /** 「更多 → 设置分组」：打开抽屉并进入分组编辑态（与备注同一交互）。 */
   /**
-   * 该账号「今日 Token」明细（`get_account_token_today`）。
+   * 该账号**今日消耗的积分**（官方口径：`officialUsage.accounts[].usageToday`）。
    *
-   * ⚠️ **缺席 = 今日无记录 / 未知** ⇒ 渲染「—」（**绝不当 0**）。
+   * ⚠️ `null` / `undefined` = 未知（官方还没采到 / 该账号不在返回里）⇒ 渲染「—」，
+   * **绝不当 0**。卡片**不再显示今日 Token**：那个数含上下文重读的缓存，
+   * 与「用量」页的输入合计对不上，摆出来只会误导。
    */
-  todayTokens?: AccountTokenTodayEntry | null;
-  /** 网关日志已到保留上限 ⇒ 网关部分是下界 ⇒ 「今日 Token」渲染 `≥N`。 */
-  todayTokensTruncated?: boolean;
+  todayCredit?: number | null;
   featuresDisabled?: boolean;
 }
 
@@ -366,7 +337,7 @@ function ProductCurrentState({
   );
 }
 
-export function AccountCard({ account, onDelete, onCheckin, onRefresh, onRefreshPart, refreshingKinds, doneKinds, refreshKinds, onExport, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliGatewayMode, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodePluginAvailable, vscodePluginActive, vscodePluginBusy, vscodePluginLoading, onSwitchVscodePlugin, jetbrainsPluginAvailable, jetbrainsPluginActive, jetbrainsPluginBusy, jetbrainsPluginLoading, onSwitchJetbrainsPlugin, onGuidePlugin, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, todayTokens, todayTokensTruncated = false, featuresDisabled = true }: Props) {
+export function AccountCard({ account, onDelete, onCheckin, onRefresh, onRefreshPart, refreshingKinds, doneKinds, refreshKinds, onExport, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliGatewayMode, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodePluginAvailable, vscodePluginActive, vscodePluginBusy, vscodePluginLoading, onSwitchVscodePlugin, jetbrainsPluginAvailable, jetbrainsPluginActive, jetbrainsPluginBusy, jetbrainsPluginLoading, onSwitchJetbrainsPlugin, onGuidePlugin, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, todayCredit, featuresDisabled = true }: Props) {
   const t = useT();
   const name = displayText(account.nickname) || displayText(account.uid) || t("wbAccounts.card.unnamed");
   const expired = typeof account.expiresAt === "number" && account.expiresAt < Date.now();
@@ -420,19 +391,12 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
 
   const metricsRow = (
     <div className="flex min-w-0 gap-[14px] text-[11.5px] text-muted-foreground">
-      <span className="inline-flex items-center gap-1">
-        {t("wbAccounts.card.metric.todayTokens")}{" "}
-        {todayTokens ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <b className="cursor-default font-semibold tabular-nums text-foreground">
-                {formatTodayTokens(todayTokens, todayTokensTruncated, t)}
-              </b>
-            </TooltipTrigger>
-            <TooltipContent side="top">
-              {todayTokensBreakdown(todayTokens, todayTokensTruncated, t)}
-            </TooltipContent>
-          </Tooltip>
+      <span className="inline-flex items-center gap-1" title={t("wbAccounts.card.metric.todayCreditTip")}>
+        {t("wbAccounts.card.metric.todayCredit")}{" "}
+        {todayCredit != null && Number.isFinite(todayCredit) ? (
+          <b className="cursor-default font-semibold tabular-nums text-foreground">
+            {t("wbAccounts.card.metric.todayCreditValue", { value: formatCredits(todayCredit) })}
+          </b>
         ) : (
           <b className="font-semibold tabular-nums text-foreground">—</b>
         )}

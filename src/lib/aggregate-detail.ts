@@ -22,8 +22,10 @@ export interface AggregateDetailContext {
   credit?: CreditExpiry;
   /** Trae / Qoder 的积分（卡片上那个「剩余 / 总额」）。 */
   credits?: { remaining: number | null; total: number | null } | null;
-  /** 今日 Token（缺席 = 未知，**不当 0**）。 */
+  /** 今日 Token（**真实新增**：非缓存输入 + 输出；缺席 = 未知，**不当 0**）。 */
   todayTokens?: number | null;
+  /** 今日输入里命中缓存、已被 {@link todayTokens} 剔除的部分（仅作说明）。 */
+  todayTokensCache?: number | null;
   /** 今日是否已签到（`null` / 缺席 = 未知）。 */
   todayCheckedIn?: boolean | null;
   /**
@@ -133,6 +135,12 @@ export function aggregateDetailStats(
       key: "todayTokens",
       label: t("wbAccounts.card.metric.todayTokens"),
       valueText: compactTokens(ctx.todayTokens),
+      subText:
+        ctx.todayTokensCache != null && ctx.todayTokensCache > 0
+          ? t("wbAccounts.card.metric.todayTokensCache", {
+              value: compactTokens(ctx.todayTokensCache),
+            })
+          : undefined,
     });
   }
 

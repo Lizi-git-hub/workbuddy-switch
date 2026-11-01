@@ -85,6 +85,14 @@ export interface UsageViewProps {
   viewWindow: UsageWindow;
   combineAll: boolean;
   onViewWindowChange: (next: UsageWindow) => void;
+  /**
+   * 页头「刷新统计」的序号：每点一次 +1。
+   *
+   * ⚠️ 只靠 key 重挂载是不够的 —— 子页首屏会读自己的内存缓存（`statisticsCache`），
+   * 重挂载后仍然命中旧数据，表现为「点了刷新没反应，必须再点页内的『刷新积分』」。
+   * 子页监听这个序号，变化时走**强制刷新**（refresh = true）那条路。
+   */
+  refreshSeq?: number;
 }
 
 /**

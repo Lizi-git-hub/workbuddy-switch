@@ -1873,6 +1873,72 @@ fn collect_sources_for(
     }
 }
 
+/// 「今日 · 按账号」的 Token 用量（账号卡片 / 详情抽屉用）。
+///
+/// ⚠️ 刻意**不用** `token_daily`：那是一个独立的「按 session 累加」账本，
+/// 副本去重依赖复制账本映射，且会混入其他产品的日志 —— 实测出现
+/// 「单账号今日 7,441 万 > 全站合计 3,324 万」这种明显矛盾。
+/// 这里直接复用与「用量 → 趋势」**完全相同**的扫描 + 去重结果
+/// （`sessions[]` 已按副本组只保留最全的一份），两处数字必然对得上。
+pub fn account_today_by_uid(filter: RegionFilter) -> Value {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let stats = get_statistics_for_filter(filter, None);
+    /* (输入, 输出, 缓存命中)：`input` 本身**含**缓存读（上游口径），所以缓存命中要
+       单独带出来，界面才能给出「真实新增」而不是上下文全量的累加值。 */
+    let mut per_uid: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+    if let Some(sources) = stats["sources"].as_array() {
+        for source in sources {
+            let Some(sessions) = source["sessions"].as_array() else {
+                continue;
+            };
+            for session in sessions {
+                let Some(uid) = session["accountId"].as_str() else {
+                    continue;
+                };
+                let Some(daily) = session["daily"].as_array() else {
+                    continue;
+                };
+                for point in daily {
+                    if point["key"].as_str() != Some(today.as_str()) {
+                        continue;
+                    }
+                    let entry = per_uid.entry(uid.to_string()).or_default();
+                    entry.0 = entry
+                        .0
+                        .saturating_add(point["input"].as_u64().unwrap_or(0));
+                    entry.1 = entry
+                        .1
+                        .saturating_add(point["output"].as_u64().unwrap_or(0));
+                    entry.2 = entry
+                        .2
+                        .saturating_add(point["cacheRead"].as_u64().unwrap_or(0));
+                }
+            }
+        }
+    }
+    let accounts: Vec<Value> = per_uid
+        .into_iter()
+        .map(|(uid, (input, output, cache_read))| {
+            json!({
+                "uid": uid,
+                "clientIn": input,
+                "clientOut": output,
+                /* 输入里属于缓存命中的部分（`input` 已含它，仅用于界面对账）。 */
+                "clientCacheRead": cache_read,
+                /* 网关已整体下线，这两项恒为 0（字段保留，前端契约不变）。 */
+                "gatewayIn": 0,
+                "gatewayOut": 0,
+            })
+        })
+        .collect();
+    json!({
+        "date": today,
+        "accounts": accounts,
+        "unknownClient": { "in": 0, "out": 0 },
+        "gatewayTruncated": false,
+    })
+}
+
 pub fn get_statistics_for_filter(filter: RegionFilter, days: Option<i64>) -> Value {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let generated_at = crate::modules::config::now_ms();

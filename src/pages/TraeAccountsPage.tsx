@@ -59,6 +59,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { compactTokens } from "@/components/usage/format";
+import { cacheReadOf, todayTokenNet } from "@/components/account-card";
 import * as api from "@/lib/api";
 import type { CheckinStatusEntry } from "@/lib/api";
 import type { AccountTokenTodayEntry } from "@/lib/types";
@@ -1440,9 +1441,8 @@ export default function TraeAccountsPage() {
     const credBad = detail.jwtStatus === "expired";
 
     const detailTokens = todayTokens[detail.userId];
-    const detailTokensTotal = detailTokens
-      ? detailTokens.gatewayIn + detailTokens.gatewayOut
-      : null;
+    const detailTokensTotal = detailTokens ? todayTokenNet(detailTokens) : null;
+    const detailCacheRead = detailTokens ? cacheReadOf(detailTokens) : 0;
     const tokensBlock: DetailStat = {
       key: "tokens",
       label: t("shared.stat.tokens"),
@@ -1455,7 +1455,12 @@ export default function TraeAccountsPage() {
                 value: compactTokens(detailTokensTotal),
               })
             : compactTokens(detailTokensTotal),
-      subText: t("shared.stat.tokensGatewayOnly"),
+      subText:
+        detailCacheRead > 0
+          ? t("wbAccounts.card.metric.todayTokensCache", {
+              value: compactTokens(detailCacheRead),
+            })
+          : t("shared.stat.tokensGatewayOnly"),
       refreshKind: "tokens",
     };
 

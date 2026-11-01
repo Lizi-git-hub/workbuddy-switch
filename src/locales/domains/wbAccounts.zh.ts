@@ -137,11 +137,23 @@ export const zh = {
   "wbAccounts.card.metric.credits": "积分",
   // 原型该格只有「今日」两字（`<span>今日 <b>…</b></span>`），不是「今日 Token」。
   "wbAccounts.card.metric.todayTokens": "今日",
+  // 卡片第三格改显示**今日消耗的积分**（官方口径）—— 今日 Token 含上下文重读的缓存，
+  // 与用量页的输入合计天然对不上，已从卡片/表格移除。
+  "wbAccounts.card.metric.todayCredit": "今日消耗",
+  "wbAccounts.card.metric.todayCreditValue": "{value} 分",
+  "wbAccounts.card.metric.todayCreditTip": "官方用量口径：该账号今天累计消耗的积分",
+  "wbAccounts.card.metric.todayCreditSub": "官方口径 · 今日累计",
+  "wbAccounts.card.metric.todayCreditUnknown": "官方暂未提供该账号今日读数",
   // 第三格原型是**无标签的相对时间**；标签与绝对时刻改挂 `title`。
   "wbAccounts.card.metric.lastUsedTip": "最后使用 {time}",
   // 「今日 Token」= 下界（网关日志已到保留上限）时的前缀；`{value}` 已含紧凑计数（如 42.1K）。
   "wbAccounts.card.metric.atLeast": "≥{value}",
-  // 「今日 Token」明细（tooltip）：客户端自身 CLI 用量 / 经本网关的用量，各自 输入·输出。
+  // 「今日 Token」明细（tooltip）：**真实新增**的输入/输出。
+  // 上游 `input_tokens` 含每次请求重读的整段上下文，长会话累加会虚高两个数量级，
+  // 所以 headline 用「非缓存输入 + 输出」，缓存命中单独一行说明（不从总数里藏掉）。
+  "wbAccounts.card.metric.todayTokensClientNet": "客户端 新增 入 {input} · 出 {output}",
+  "wbAccounts.card.metric.todayTokensCache": "缓存命中 {value}（重读上下文，不计入新增）",
+  // 兼容旧字典：网关已下线，这两条只在历史数据里还会命中。
   "wbAccounts.card.metric.todayTokensClient": "客户端 入 {input} · 出 {output}",
   "wbAccounts.card.metric.todayTokensGateway": "网关 入 {input} · 出 {output}",
   // 下界说明：`gatewayTruncated` 时**必须**带上，只给数字不说口径就是误导。
@@ -430,6 +442,7 @@ export const zh = {
   "wbAccounts.table.status": "状态",
   "wbAccounts.table.credits": "积分",
   "wbAccounts.table.todayTokens": "今日 Token",
+  "wbAccounts.table.todayCredit": "今日消耗",
   "wbAccounts.table.expiry": "到期",
   "wbAccounts.table.creditExpiry": "积分到期",
   "wbAccounts.table.creditExpiryDays": "{days} 天",

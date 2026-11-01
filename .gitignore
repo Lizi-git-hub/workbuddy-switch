@@ -80,3 +80,5 @@ _*.cjs
 reference/
 deliverables/
 release-notes.md
+# 临时探针/构建缓存，绝不入库
+temp_debug/

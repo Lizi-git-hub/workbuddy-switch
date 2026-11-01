@@ -160,7 +160,10 @@ export default function UsagePage({ defaultTab = "trend" }: { defaultTab?: Usage
   /* 页头刷新：只重挂**当前视图**（`key` 变化 ⇒ 子页面重新取数）。
      ⚠️ 不做「全局刷新信号」：四个视图数据源不同，重挂当前视图是唯一不会
      让「另一个视图的空请求」也一起打的方案。 */
-  const [reloadKey, setReloadKey] = useState(0);
+  /* 仅作子页 key（保留以支持将来强制重挂载）；当前刷新由 refreshSeq 驱动。 */
+  const [reloadKey] = useState(0);
+  /** 页头「刷新统计」序号：子页监听它走强制刷新（见 `UsageViewProps.refreshSeq`）。 */
+  const [refreshSeq, setRefreshSeq] = useState(0);
   /* 页头刷新的**进行中态**：动作本身只是重挂当前视图（`setReloadKey`），
      真正的取数由子页面自身呈现 —— 按钮侧给「至少 500ms」的吸底反馈即可。 */
   const { busy, run } = useRefreshAction();
@@ -175,6 +178,7 @@ export default function UsagePage({ defaultTab = "trend" }: { defaultTab?: Usage
     /* 直接给实际账本：早先这里在 `ledgerVisible` 为假时退回 "all"，
        结果子页把「客户端 + 网关」都渲染出来（网关那张永远是空表）。 */
     ledger: activeLedger,
+    refreshSeq,
     /* 视图内也能改账本（例：会话视图「按账号查看网关用量」跳转）。 */
     onLedgerChange: ledgerVisible ? setLedger : undefined,
   };
@@ -196,7 +200,12 @@ export default function UsagePage({ defaultTab = "trend" }: { defaultTab?: Usage
           variant="outline"
           size="default"
           disabled={busy}
-          onClick={() => void run(() => setReloadKey((value) => value + 1))}
+          onClick={() =>
+            void run(() => {
+              /* 两个动作：刷新序号驱动子页**强制重采**，reloadKey 兜底重挂载。 */
+              setRefreshSeq((value) => value + 1);
+            })
+          }
         >
           {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
           {t("wbStats.token.refresh")}

@@ -783,6 +783,7 @@ export default function TokenStatsPage({
   viewWindow,
   combineAll,
   onViewWindowChange,
+  refreshSeq = 0,
   ledger = "all",
   onLedgerChange,
 }: { view?: TokenUsageView; ledger?: UsageLedger; onLedgerChange?: (next: UsageLedger) => void } & UsageViewProps) {
@@ -793,6 +794,12 @@ export default function TokenStatsPage({
   const [loading, setLoading] = useState(() => !statisticsCache[region]);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+
+  /* 页头「刷新统计」：序号变化 ⇒ 走内部 reload（真正重新拉 stats）。 */
+  useEffect(() => {
+    if ((refreshSeq ?? 0) <= 0) return;
+    setReload((value) => value + 1);
+  }, [refreshSeq]);
   /* 三处「重试 / 刷新」出口（错误 Alert、两种空态）共用同一个 reload 触发 ⇒ 共用一个实例。 */
   const { busy: reloadBusy, run: runReload } = useRefreshAction();
   const [gatewayTrend, setGatewayTrend] = useState<GatewayTokenTrend | null>(

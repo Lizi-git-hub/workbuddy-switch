@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { AlertTriangle, ListTree, RotateCw, SearchX, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
-import { AccountCard, type GuideTarget } from "@/components/account-card";
+import { AccountCard, cacheReadOf, todayTokenNet, type GuideTarget } from "@/components/account-card";
 import { TraeAccountCard } from "@/components/trae-account-card";
 import { QoderAccountCard } from "@/components/qoder/qoder-account-card";
 import { AggregateFilterPanel } from "@/components/aggregate/aggregate-filter-panel";
@@ -760,8 +760,6 @@ export default function AggregateAccountsPage() {
             jetbrainsPluginBusy={wbSwitch.slotBusy("jetbrains")}
             jetbrainsPluginLoading={wbSwitch.slotLoading("jetbrains", item.data.id)}
             jetbrainsPluginActive={item.data.id === wbPrograms.jetbrains?.activeAccountId}
-            todayTokens={todayTokens}
-            todayTokensTruncated={signals?.todayTokensTruncated}
             todayCheckedIn={checkinToday ?? undefined}
             travelStatus={signals?.travel.get(item.data.id)}
             creditPriority={item.data.id === priorityIdByScope.get(item.scope)}
@@ -1121,10 +1119,9 @@ export default function AggregateAccountsPage() {
         detailAccount.platform === "trae"
           ? { remaining: detailAccount.data.remainingCredits, total: detailAccount.data.credits }
           : null,
-      /* 今日 Token 的**总量**（客户端 + 网关）；缺席 = 未知 ⇒ 那一格不渲染。 */
-      todayTokens: todayEntry
-        ? todayEntry.clientIn + todayEntry.clientOut + todayEntry.gatewayIn + todayEntry.gatewayOut
-        : null,
+      /* 今日 Token 的**真实新增**（非缓存输入 + 输出）；缺席 = 未知 ⇒ 那一格不渲染。 */
+      todayTokens: todayEntry ? todayTokenNet(todayEntry) : null,
+      todayTokensCache: todayEntry ? cacheReadOf(todayEntry) : null,
       todayCheckedIn: checkinTodayOf(signals, detailAccount),
       currentProgram:
         detailAccount.platform === "workbuddy"

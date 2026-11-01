@@ -11,7 +11,7 @@ import { shouldOpenAccountDetail } from "@/lib/account-open-guard";
 import type { AccountTokenTodayEntry } from "@/lib/types";
 import { compactTokens } from "@/components/usage/format";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { AVATAR_TEXT_CLASS, accountInitials, avatarTone } from "@/components/account-card";
+import { AVATAR_TEXT_CLASS, accountInitials, avatarTone, todayTokenNet } from "@/components/account-card";
 import { displayText } from "@/lib/display-text";
 import { cooldownAgeKey, describeTraeCooldown } from "@/lib/trae-cooldown";
 import { EXPIRY_TIP_MAX_HEIGHT, summarizeExpiring } from "@/lib/credit-expiry";
@@ -458,9 +458,8 @@ export function TraeAccountCard({
     return sum > 0 ? sum : null;
   })();
 
-  /** 今日 Token 合计（客户端 + 网关；Trae 客户端档恒为 0）。 */
-  const todayTokenTotal = (entry: AccountTokenTodayEntry) =>
-    entry.clientIn + entry.clientOut + entry.gatewayIn + entry.gatewayOut;
+  /** 今日 Token 合计（**真实新增**：非缓存输入 + 输出；Trae 客户端档恒为 0）。 */
+  const todayTokenTotal = (entry: AccountTokenTodayEntry) => todayTokenNet(entry);
 
   const lastUpdatedRelative = formatRelativeTime(updatedSeconds === null ? null : updatedSeconds * 1000, t);
   const metricsRow = (
