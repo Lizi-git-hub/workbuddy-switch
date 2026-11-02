@@ -2231,6 +2231,37 @@ fn run_copy_batch(
     let target_uid = batch.target_uid.clone();
     let mut copied: Vec<Value> = Vec::with_capacity(total);
     for (index, plan) in plans.iter().enumerate() {
+        let jsonl_ok = jsonl_copied[index];
+
+        // 正文没落地就**不建索引行、不记账本**，只把原因报上去。
+        //
+        // 为什么要拦在这里：没有正文的索引行就是一个「空壳会话」——侧栏看得见、点进去
+        // 一张白纸；而且账本一记，`ledger_hit` 之后每次都当「已复制」跳过，用户连重试
+        // 都做不到（现场 2026-11-02：复制落在 10:51:06，源会话的 jsonl 到 10:53:32 才
+        // flush 落盘，于是目标账号凭空多出一个空会话）。
+        //
+        // 两类成因都走这条分支：源正文文件不存在（会话还在写、或确实一条消息都没有），
+        // 或正文读写出错。宁可让用户看到「没复制」，也不要给一个假的成功。
+        if !jsonl_ok {
+            let reason = if plan.jsonl_src.is_none() {
+                "源会话正文尚未落盘（会话可能还在写入），本次没有创建副本；等源会话写完后重新复制即可"
+            } else {
+                "源会话正文读取或写入失败，本次没有创建副本；请检查磁盘空间与权限后重试"
+            };
+            copied.push(json!({
+                "id": plan.cid,
+                "newId": plan.new_cid,
+                "jsonlCopied": false,
+                "sessionRowWritten": false,
+                "mappingWritten": false,
+                "backup": Value::Null,
+                "deduplicated": false,
+                "ledgerWritten": false,
+                "warning": reason,
+            }));
+            continue;
+        }
+
         // 备份整批只做一次：在**第一个**真正复制的会话之前拍快照。
         let backup = batch.ensure_backup();
         let columns = batch.dst_columns();
@@ -2246,22 +2277,20 @@ fn run_copy_batch(
         };
         batch.ledger_record(&plan.cid, &plan.new_cid);
 
+        // 走到这里正文一定已经落盘（没落盘的在上面的提前返回里走掉了）。
+        if let Some(dst) = &plan.jsonl_dst {
+            batch.record_baseline(&plan.cid, &plan.new_cid, dst);
+        }
         // 降级警告优先级不变：备份失败最优先（关系还有没有回滚点），
         // 其次才是索引行 / 云端映射。
-        let jsonl_ok = jsonl_copied[index];
-        if jsonl_ok {
-            if let Some(dst) = &plan.jsonl_dst {
-                batch.record_baseline(&plan.cid, &plan.new_cid, dst);
-            }
-        }
         let warning = match &batch.backup_error {
             Some(error) => Some(format!(
                 "复制前备份失败（{error}）；本次复制没有可回滚的备份点，请手动备份后重试"
             )),
-            None if jsonl_ok && !session_row_written => Some(
+            None if !session_row_written => Some(
                 "目标账号的会话索引不可写；已复制正文，请重启 WorkBuddy 让其重建索引".to_string(),
             ),
-            None if jsonl_ok && !mapping_written => {
+            None if !mapping_written => {
                 Some("云端映射注册失败；新会话暂时无法在 WorkBuddy 中显示云端历史".to_string())
             }
             None => None,
@@ -2285,7 +2314,10 @@ fn run_copy_batch(
     // 账本整批一次落盘（失败不致命：下次会重新复制）。
     if batch.flush_ledger() {
         for item in copied.iter_mut() {
-            item["ledgerWritten"] = json!(true);
+            // 正文没落地的那些**本来就没记账**（记了重试会被去重挡掉），这里也不能谎报。
+            if item["jsonlCopied"].as_bool() == Some(true) {
+                item["ledgerWritten"] = json!(true);
+            }
         }
     }
     batch.flush_baselines();

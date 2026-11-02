@@ -383,8 +383,10 @@ export function SwitchAccountDialog({
       });
       const nickname =
         accountDisplayName(account);
-      if (res.sessionCopy?.copied.length) {
-        parts.push(t("wbAccounts.dialog.copiedSessions", { n: res.sessionCopy.copied.length }));
+      // 正文没落地的副本不算「已复制」：后端不会为它建索引行，只回一条 warning。
+      const copiedOk = (res.sessionCopy?.copied ?? []).filter((c) => c.jsonlCopied);
+      if (copiedOk.length) {
+        parts.push(t("wbAccounts.dialog.copiedSessions", { n: copiedOk.length }));
       }
       if (res.sessionCopy?.skipped?.length) {
         parts.push(t("wbAccounts.dialog.skippedSessions", { n: res.sessionCopy.skipped.length }));
