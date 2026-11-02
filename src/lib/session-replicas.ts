@@ -254,26 +254,39 @@ export function titleChoices(
  *
  * 这条路只写标题：后端 `sync_session_replica_for` 会因为「已一致」返回
  * `appendedLines: 0`，随后才执行 `apply_session_title` ⇒ **正文一个字节都不动**。
- * 方向无所谓（内容相同），取第一份当源。
+ * 内容一致，所以「拿哪一份当内容源」无所谓 —— 但**改名对象不能无所谓**：
+ * 后端只给 `targetCid` 写标题，被排除在 target 之外的那份永远改不到名字。
  */
 export function buildTitleOnlyItems(
   group: SessionGroupView,
   title: string,
 ): SyncSessionReplicaItem[] {
   const previewToken = group.previewToken;
-  if (!previewToken || !title) return [];
+  const want = (title ?? "").trim();
+  if (!previewToken || !want) return [];
   if (group.rows.length < 2) return [];
-  const source = group.rows[0];
-  if (!source) return [];
+
+  // 只给「当前名字与目标名不同」的副本发任务 —— **包含 `rows[0]`**。
+  //
+  // 旧实现把 `rows[0]` 钉死当内容源、永不作为 target，于是选中「第一份之外的那个
+  // 名字」时整批写成一次空操作：被改的那份本来就叫这个名字，该改的那份一个字没动
+  // （现场 2026-11-02：选客观存在的「脚本测试」，结果只刷新了客观存在那行的时间戳）。
   return group.rows
-    .filter((row) => row.sessionId !== source.sessionId)
-    .map((row) => ({
-      sourceCid: source.sessionId,
-      targetCid: row.sessionId,
-      groupKey: group.key,
-      previewToken,
-      title,
-    }));
+    .filter((row) => (group.titles.get(row.sessionId) ?? "").trim() !== want)
+    .flatMap((row) => {
+      // 内容源换一份（彼此内容一致），否则 source === target 会被后端拒。
+      const other = group.rows.find((candidate) => candidate.sessionId !== row.sessionId);
+      if (!other) return [];
+      return [
+        {
+          sourceCid: other.sessionId,
+          targetCid: row.sessionId,
+          groupKey: group.key,
+          previewToken,
+          title: want,
+        },
+      ];
+    });
 }
 
 export function buildUnifyItems(
