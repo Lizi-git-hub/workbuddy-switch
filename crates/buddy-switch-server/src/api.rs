@@ -235,6 +235,8 @@ fn api_routes() -> Router {
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/replicas", get(api_session_replicas))
+        // 清除本工具自己的会话关联登记（复制账本 / 基线 / 指纹缓存），不动任何会话文件。
+        .route("/api/sessions/clear-cache", post(api_session_clear_cache))
         // P8 · 安全同步（增量追加）—— **写操作**：只往目标 jsonl 追加，绝不改写已有内容。
         .route("/api/sessions/sync", post(api_session_sync))
         .route("/api/sessions/unify", post(api_session_unify))
@@ -2342,6 +2344,15 @@ async fn api_session_replicas(RawQuery(query): RawQuery) -> Response {
     }
     let region = parse_region(query_value(query.as_deref(), "region").as_deref());
     json_ok(session::list_replica_groups_for(region))
+}
+
+async fn api_session_clear_cache(RawQuery(query): RawQuery) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(query_value(query.as_deref(), "region").as_deref());
+    json_ok(session::clear_session_cache(region))
 }
 
 async fn api_session_sync(Json(body): Json<Value>) -> Response {

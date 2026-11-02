@@ -255,7 +255,10 @@ export function SwitchAccountDialog({
   const crossRegion = sourceRegion !== targetRegion;
   const tree = buildSessionTree(sessions, t);
   const stats = treeSelectionStats(tree, selected);
-  const sessionsEmpty = !loadingSessions && sessions.length === 0;
+  /* 空壳会话（db 有行、本机没 jsonl）被 `buildSessionTree` 过滤掉了 ⇒ 空态判据必须看树，
+     否则「只有空壳」时会露出一棵空树而不是空态。 */
+  const hiddenEmptySessions = sessions.filter((session) => session.hasHistory === false).length;
+  const sessionsEmpty = !loadingSessions && tree.length === 0;
   const needsPermission = permissionDenied(error);
   // 空列表的成因必须分开说，否则会把用户引向错误结论：
   //   no-dir → 该版本的数据目录空了（客户端刚重装 / 重置）；empty → 该版本账号确实没有会话。
@@ -617,17 +620,24 @@ export function SwitchAccountDialog({
                         }
                       />
                     ) : (
-                      <SessionTree
-                        tree={tree}
-                        selected={selected}
-                        expanded={expanded}
-                        stats={stats}
-                        onToggleSession={toggleSession}
-                        onToggleType={handleToggleType}
-                        onToggleDir={handleToggleDir}
-                        onToggleExpanded={toggleExpanded}
-                        onSelectAll={handleSelectAll}
-                      />
+                      <>
+                        {hiddenEmptySessions > 0 ? (
+                          <p className="mb-2 text-xs text-muted-foreground">
+                            {t("wbAccounts.dialog.emptySessionsHidden", { n: hiddenEmptySessions })}
+                          </p>
+                        ) : null}
+                        <SessionTree
+                          tree={tree}
+                          selected={selected}
+                          expanded={expanded}
+                          stats={stats}
+                          onToggleSession={toggleSession}
+                          onToggleType={handleToggleType}
+                          onToggleDir={handleToggleDir}
+                          onToggleExpanded={toggleExpanded}
+                          onSelectAll={handleSelectAll}
+                        />
+                      </>
                     )}
                   </section>
                 )}

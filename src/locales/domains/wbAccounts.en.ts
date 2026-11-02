@@ -183,6 +183,7 @@ export const en = {
   "wbAccounts.dialog.listSeparator": "; ",
   "wbAccounts.dialog.switchProcessing": "Processing, please don't close this window",
   "wbAccounts.dialog.copySessions": "Copy sessions to target account",
+  "wbAccounts.dialog.emptySessionsHidden": "Hid {n} empty sessions (indexed but with no local session file)",
   "wbAccounts.dialog.copyHintLoading": "Loading sessions…",
   "wbAccounts.dialog.copyHintErrorEmpty": "Can't load the session list; copying is unavailable",
   "wbAccounts.dialog.copyHintEmptyCurrent": "The current account has no sessions in {region}; if they live in the other version, switch the \"Source version\" above",

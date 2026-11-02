@@ -2795,7 +2795,19 @@ pub fn list_replica_groups_for(region: Region) -> Value {
     let mut groups: Vec<Value> = Vec::with_capacity(entries.len());
     // 本次真的请求过的键 ⇒ 用来剪掉「会话已被删掉」的陈旧条目（缓存不无限长）。
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    /* 「本机没有内容的组」计数：换机后旧账本也跟着数据目录搬过来时，成员 jsonl 一个都不在
+       —— 这种组既没有可对比的内容、也没有可复制的源，渲染出来只会是一排「状态未知」。
+       直接不展示，并把条数交给前端提示「有 N 条历史残留，可清除」。 */
+    let mut stale = 0usize;
     for entry in &entries {
+        if !entry
+            .members
+            .iter()
+            .any(|(_, cid)| projects.contains_key(cid))
+        {
+            stale += 1;
+            continue;
+        }
         let fingerprints = fingerprints_for_members(&mut store, region, &projects, &entry.members);
         for (_uid, cid) in &entry.members {
             seen.insert(fingerprint_key(region, cid));
@@ -2817,7 +2829,42 @@ pub fn list_replica_groups_for(region: Region) -> Value {
     store.prune_region(region, &seen);
     let cache_path = fingerprint_cache_path();
     store.save_if_worthwhile(&cache_path);
-    json!({ "groups": groups, "source": source })
+    json!({ "groups": groups, "source": source, "staleGroups": stale })
+}
+
+/// 清除「会话关联」的全部本地登记：复制账本 + 基线表 + 内容指纹缓存。
+///
+/// ⚠️ 只删**本工具自己的**三份文件，不碰 `~/.workbuddy` 下的任何会话 —— 换机后
+/// 旧账本随数据目录被搬过来、而本机没有对应 jsonl 时，这里就是清理残留的出口。
+/// 返回被删/删不掉的**文件名**（不返回完整路径，避免把本机目录结构带进 UI）。
+pub fn clear_session_cache(region: Region) -> Value {
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    for path in [
+        copy_ledger_path_for(region),
+        session_baseline_path_for(region),
+        fingerprint_cache_path(),
+    ] {
+        if !path.exists() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("?")
+            .to_string();
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(name),
+            Err(_) => failed.push(name),
+        }
+    }
+    /* 进程内缓存同样清掉：否则「删了文件但页面还是旧读数」看起来像没生效。 */
+    if let Some(store) = FINGERPRINTS.get() {
+        if let Ok(mut guard) = store.lock() {
+            *guard = FingerprintStore::default();
+        }
+    }
+    json!({ "removed": removed, "failed": failed })
 }
 
 /// 组内各副本在 `sessions` 表里的显示标题（`custom_title` 优先，退回 `title`）。

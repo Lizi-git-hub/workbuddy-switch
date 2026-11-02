@@ -65,6 +65,7 @@ import type {
   ScheduleConfig,
   ScheduleRunResult,
   Session,
+  SessionCacheClearResponse,
   SessionReplicaResponse,
   SkillCopyReport,
   SkillImportResult,
@@ -367,6 +368,8 @@ const ROUTES: Record<string, Route> = {
   list_sessions: { method: "GET", path: "/api/sessions" },
   // P8 T02 · 只读：copy ledger 连通成「会话副本组」（两宿主同步）。
   list_session_replicas: { method: "GET", path: "/api/sessions/replicas" },
+  // 清除本工具的会话关联登记（账本/基线/指纹缓存），**不动**任何会话文件。
+  clear_session_cache: { method: "POST", path: "/api/sessions/clear-cache" },
   // P14 S4a · VS Code 插件 / CodeBuddy IDE 的会话仓（**与桌面版不是同一套存储**，
   // 所以单开路由而不是往 `/api/sessions` 塞 `client` 参数）。
   list_vscode_sessions: { method: "GET", path: "/api/vscode-sessions" },
@@ -1305,6 +1308,16 @@ export function listSessions(region?: Region): Promise<{
 
 export function listSessionReplicas(region?: Region): Promise<SessionReplicaResponse> {
   return call("list_session_replicas", region ? { region } : undefined);
+}
+
+/**
+ * 清除「会话关联」的本地登记：复制账本、基线表、内容指纹缓存。
+ *
+ * ⚠️ 只删本工具自己的三份文件，**不碰** `~/.workbuddy` 里的任何会话。
+ * 换机后旧账本被一起搬过来、本机又没有对应会话文件时，用它清掉那批「状态未知」。
+ */
+export function clearSessionCache(region?: Region): Promise<SessionCacheClearResponse> {
+  return call("clear_session_cache", region ? { region } : undefined);
 }
 
 export function syncSessionReplicas(

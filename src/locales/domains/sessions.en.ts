@@ -6,6 +6,16 @@ export const en = {
   "sessions.toolbar.title": "{client} sessions",
   "sessions.toolbar.client": "WorkBuddy desktop",
   /* Card head (prototype `.sg-head`): status badge + "{count} replicas"; plus the a11y label. */
+  "sessions.cache.clear": "Clear replica cache",
+  "sessions.cache.clearHint": "Remove the copy ledger, last-agreed points and fingerprint cache",
+  "sessions.cache.clearTitle": "Clear session replica cache?",
+  "sessions.cache.clearDesc": "Only this app's own records are removed (copy ledger, last-agreed points, content fingerprint cache). No session file is deleted. The replica view will become empty and new copies will be recorded from scratch.",
+  "sessions.cache.clearConfirm": "Clear",
+  "sessions.cache.cancel": "Cancel",
+  "sessions.cache.cleared": "Cleared {n} cache file(s)",
+  "sessions.cache.nothing": "Nothing to clear",
+  "sessions.cache.clearFail": "Clear failed: {error}",
+  "sessions.cache.staleHint": "{n} old ledger entries have no matching session on this machine (usually because the data directory was moved here); they are hidden.",
   "sessions.card.replicaCount": "{count} replicas",
   "sessions.card.openAria": "Open session group {title}",
 

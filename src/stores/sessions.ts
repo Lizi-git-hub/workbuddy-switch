@@ -19,6 +19,13 @@ interface SessionsState {
    * （页面据此区分「加载中」与「真的空」，避免闪一下空态）。
    */
   source: "ledger" | "empty" | null;
+  /**
+   * 本机没有内容的账本组数量（成员 jsonl 全都不在本机）。
+   *
+   * 换机后旧账本跟着数据目录搬过来就会出现 —— 不渲染这些组，只在页面上给一条
+   * 「有 N 条历史残留，可清除」的提示 + 清理入口。
+   */
+  staleGroups: number;
   loading: boolean;
   error: string | null;
   /** 加载某 region 的副本组（账号显示名 / 会话行 join 一并完成）。 */
@@ -31,6 +38,8 @@ interface SessionsState {
     region: Region,
     items: UnifySessionReplicaItem[],
   ) => Promise<UnifySessionReplicaResponse>;
+  /** 清除复制账本 / 基线 / 指纹缓存（只删本工具自己的登记），随后重新加载。 */
+  clearCache: (region: Region) => Promise<string[]>;
 }
 
 /** 该 region 已加载的账号（从账号 store 读，**不另起一份清单**）。 */
@@ -38,9 +47,10 @@ function accountsFor(region: Region) {
   return selectRegionSlice(useAccountsStore.getState(), region).accounts;
 }
 
-export const useSessionsStore = create<SessionsState>((set) => ({
+export const useSessionsStore = create<SessionsState>((set, get) => ({
   groups: [],
   source: null,
+  staleGroups: 0,
   loading: false,
   error: null,
 
@@ -49,7 +59,12 @@ export const useSessionsStore = create<SessionsState>((set) => ({
     try {
       const response = await api.listSessionReplicas(region);
       if (response.groups.length === 0) {
-        set({ groups: [], source: response.source, loading: false });
+        set({
+          groups: [],
+          source: response.source,
+          staleGroups: response.staleGroups ?? 0,
+          loading: false,
+        });
         return;
       }
 
@@ -80,7 +95,12 @@ export const useSessionsStore = create<SessionsState>((set) => ({
         sessionsByAccount,
         accountLabels,
       );
-      set({ groups, source: response.source, loading: false });
+      set({
+        groups,
+        source: response.source,
+        staleGroups: response.staleGroups ?? 0,
+        loading: false,
+      });
     } catch (e) {
       set({ groups: [], error: api.asError(e), loading: false });
     }
@@ -92,5 +112,12 @@ export const useSessionsStore = create<SessionsState>((set) => ({
 
   unifyItems(region, items) {
     return api.unifySessionReplicas(items, region);
+  },
+
+  async clearCache(region) {
+    const result = await api.clearSessionCache(region);
+    /* 清完立刻重载：不重载的话页面还挂着旧的 groups，看起来像没生效。 */
+    await get().load(region);
+    return result.removed;
   },
 }));

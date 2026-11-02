@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Download, Filter, GitBranch, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, Download, Filter, GitBranch, Info, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { SessionReplicaView } from "@/components/sessions/session-replica-view";
@@ -9,6 +9,7 @@ import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
@@ -38,6 +39,8 @@ export default function SessionsPage() {
   const load = useSessionsStore((s) => s.load);
   const syncItems = useSessionsStore((s) => s.syncItems);
   const unifyItems = useSessionsStore((s) => s.unifyItems);
+  const staleGroups = useSessionsStore((s) => s.staleGroups);
+  const clearCache = useSessionsStore((s) => s.clearCache);
   /* 错误态「重试」的进行中态（按钮态，同 `syncBusy` 用 Loader2 的语言）。 */
   const { busy: retryBusy, run: runRetry } = useRefreshAction();
 
@@ -47,9 +50,29 @@ export default function SessionsPage() {
   }, [load, region]);
 
   const [statusFilter, setStatusFilter] = useState<SessionGroupStatus | "all">("all");
+  /* 「清除关联缓存」的确认弹窗 / 执行态 —— 破坏性动作必须二次确认（与删除账号同一套规矩）。 */
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
 
   const [syncBusy, setSyncBusy] = useState(false);
   const [busyGroupKeys, setBusyGroupKeys] = useState<ReadonlySet<string>>(new Set());
+  async function runClearCache() {
+    setClearBusy(true);
+    try {
+      const removed = await clearCache(region);
+      toast.success(
+        removed.length > 0
+          ? t("sessions.cache.cleared", { n: removed.length })
+          : t("sessions.cache.nothing"),
+      );
+      setClearOpen(false);
+    } catch (e) {
+      toast.error(t("sessions.cache.clearFail", { error: api.asError(e) }));
+    } finally {
+      setClearBusy(false);
+    }
+  }
+
   const statusCounts = useMemo(() => {
     const counts = new Map<SessionGroupStatus, number>();
     for (const group of groups) {
@@ -267,8 +290,26 @@ export default function SessionsPage() {
             {t("sessions.sync.all", { count: allSyncable.reduce((n, x) => n + x.items.length, 0) })}
           </Button>
         ) : null}
+        <Button
+          size="default"
+          variant="outline"
+          disabled={clearBusy}
+          title={t("sessions.cache.clearHint")}
+          onClick={() => setClearOpen(true)}
+        >
+          <Trash2 className="size-3.5" aria-hidden="true" />
+          {t("sessions.cache.clear")}
+        </Button>
         <ScopeChip scope={scope} />
       </header>
+
+      {/* 换机残留提示：本机没有内容的账本组不渲染，但必须说明「为什么看不到」，并指向清理入口。 */}
+      {staleGroups > 0 ? (
+        <div className="flex items-start gap-2 rounded-lg border border-dashed px-3 py-2 text-[12.5px] text-muted-foreground">
+          <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+          <span>{t("sessions.cache.staleHint", { n: staleGroups })}</span>
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="flex flex-col gap-3" aria-busy="true">
@@ -385,6 +426,34 @@ export default function SessionsPage() {
           />
         </Card>
       )}
+
+      {/* 「清除关联缓存」二次确认：说明只动本工具登记、不碰会话文件，避免误以为会删聊天记录。 */}
+      <Dialog
+        open={clearOpen}
+        onOpenChange={(open) => {
+          if (!clearBusy) setClearOpen(open);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("sessions.cache.clearTitle")}</DialogTitle>
+            <DialogDescription>{t("sessions.cache.clearDesc")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" disabled={clearBusy} onClick={() => setClearOpen(false)}>
+              {t("sessions.cache.cancel")}
+            </Button>
+            <Button variant="destructive" disabled={clearBusy} onClick={() => void runClearCache()}>
+              {clearBusy ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              )}
+              {t("sessions.cache.clearConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ★ P8 分歧处理：**覆盖式**统一 —— 必须「先选保留哪一份、再确认」（§3.15.2）。
           `group` 为 null ⇒ 不渲染（`UnifyReplicasDialog` 内部亦早退）。 */}

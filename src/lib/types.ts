@@ -515,6 +515,19 @@ export interface SessionReplicaContent {
 export interface SessionReplicaResponse {
   groups: SessionReplicaGroup[];
   source: "ledger" | "empty";
+  /**
+   * 本机**没有内容**的账本组数量（组内所有成员的 jsonl 都不在本机）。
+   *
+   * 典型来源：换机时把 `.buddy-switch` 数据目录一起搬过来，旧账本跟着走、会话文件没跟着走。
+   * 这类组不渲染（既无内容可对比、也无源可复制），只在这里报个数供 UI 提示「可清除」。
+   */
+  staleGroups?: number;
+}
+
+/** 「清除会话关联缓存」的返回：删掉的文件名（不含路径）与删不掉的文件名。 */
+export interface SessionCacheClearResponse {
+  removed: string[];
+  failed: string[];
 }
 
 /**

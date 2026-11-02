@@ -82,3 +82,7 @@ deliverables/
 release-notes.md
 # 临时探针/构建缓存，绝不入库
 temp_debug/
+
+# exe 运行库（打包时由 scripts/sync-runtime-dlls.sh 从系统复制，不入库）
+src-tauri/libcrypto-3-x64.dll
+src-tauri/libssl-3-x64.dll

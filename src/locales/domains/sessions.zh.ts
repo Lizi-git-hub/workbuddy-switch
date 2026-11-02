@@ -8,6 +8,17 @@ export const zh = {
   "sessions.toolbar.title": "{client} 会话",
   "sessions.toolbar.client": "WorkBuddy 桌面",
   /* 卡片头部（原型 `.sg-head`）：状态徽标 +「N 个副本」；以及可点区的无障碍标签。 */
+  /* 「清除关联缓存」：换机后旧账本残留的出口。只删本工具自己的登记，不动会话文件。 */
+  "sessions.cache.clear": "清除关联缓存",
+  "sessions.cache.clearHint": "清除复制账本、上次一致点与内容指纹缓存",
+  "sessions.cache.clearTitle": "清除会话关联缓存？",
+  "sessions.cache.clearDesc": "只删除本工具自己的三份登记（复制账本、上次一致点、内容指纹缓存），不会删除任何会话文件。清除后「关联会话」会变成空白，之后再复制会重新记录。",
+  "sessions.cache.clearConfirm": "清除",
+  "sessions.cache.cancel": "取消",
+  "sessions.cache.cleared": "已清除 {n} 份缓存",
+  "sessions.cache.nothing": "没有可清除的缓存",
+  "sessions.cache.clearFail": "清除失败：{error}",
+  "sessions.cache.staleHint": "另有 {n} 条旧账本记录在本机找不到对应会话（多半是换机时数据目录被一起搬过来），已隐藏。",
   "sessions.card.replicaCount": "{count} 个副本",
   "sessions.card.openAria": "打开会话组 {title}",
 

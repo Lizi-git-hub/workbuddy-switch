@@ -1339,6 +1339,15 @@ pub async fn list_session_replicas(region: Option<String>) -> Result<Value, Stri
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn clear_session_cache(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || session::clear_session_cache(region))
+        .await
+        .map_err(|error| format!("清除会话缓存失败: {error}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn sync_session_replicas(
     items: Vec<Value>,
     region: Option<String>,

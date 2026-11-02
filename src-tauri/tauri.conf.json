@@ -37,6 +37,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": ["libcrypto-3-x64.dll", "libssl-3-x64.dll"],
     "publisher": "Lizi-git-hub",
     "icon": [
       "icons/32x32.png",

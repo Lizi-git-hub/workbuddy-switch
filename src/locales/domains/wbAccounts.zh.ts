@@ -216,6 +216,7 @@ export const zh = {
   "wbAccounts.dialog.listSeparator": "；",
   "wbAccounts.dialog.switchProcessing": "正在处理中，请勿关闭窗口",
   "wbAccounts.dialog.copySessions": "复制会话到目标账号",
+  "wbAccounts.dialog.emptySessionsHidden": "已隐藏 {n} 个没有内容的空会话（索引里有、本机没有会话文件）",
   "wbAccounts.dialog.copyHintLoading": "正在加载会话…",
   "wbAccounts.dialog.copyHintErrorEmpty": "无法加载会话列表，暂不能复制",
   "wbAccounts.dialog.copyHintEmptyCurrent": "「{region}」当前账号没有会话，无法复制；若会话在另一版本，请切换上方的「数据来源版本」",

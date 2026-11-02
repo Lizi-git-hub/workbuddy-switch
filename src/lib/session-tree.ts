@@ -99,8 +99,12 @@ function toLeaf(session: Session): SessionLeaf {
  * （那会让「三层」这条契约出现例外分支）。
  */
 export function buildSessionTree(sessions: Session[], t: Translate): SessionTypeNode[] {
-  const tasks = sessions.filter((session) => session.isPlayground);
-  const spaces = sessions.filter((session) => !session.isPlayground);
+  /* 只列**本机真有会话文件**的项（`hasHistory === false` = jsonl 不在本机）。
+     db 索引里常年躺着一批空壳会话，它们在弹窗里表现为一排「无标题」，勾选后也复制不出
+     任何内容（后端只会逐条失败）。这类项直接不列，数量交给调用方提示。 */
+  const usable = sessions.filter((session) => session.hasHistory !== false);
+  const tasks = usable.filter((session) => session.isPlayground);
+  const spaces = usable.filter((session) => !session.isPlayground);
   const groups: { label: string; sessions: Session[] }[] = [];
   if (tasks.length > 0) {
     groups.push({ label: t("wbAccounts.wizard.typeConversation"), sessions: tasks });
