@@ -2864,6 +2864,148 @@ pub fn list_replica_groups_for(region: Region) -> Value {
     json!({ "groups": groups, "source": source, "staleGroups": stale })
 }
 
+/// 写会话数据前的**客户端状态闸门**。
+///
+/// 删除副本、增量同步、统一标题这三类操作都会直接改写 `projects/**/*.jsonl` 或
+/// `sessions` 行。WorkBuddy 运行时：
+/// - 内存里持有会话列表，删掉的会话**会显示到下次启动**（看起来「删了没反应」）；
+/// - 正在写的会话被移走后，客户端会**重建同名文件**继续追加（删了又回来）；
+/// - 标题用内存值覆盖回库（同步/统一的改动丢失）。
+///
+/// 所以这三类操作要求客户端**完全退出**（含托盘）。纯读操作不受影响。
+pub fn client_write_block(region: Region) -> Option<String> {
+    crate::modules::process::is_workbuddy_running_for(region).then(|| {
+        "WorkBuddy 正在运行：请先完全退出客户端（含托盘）后再操作。\
+         客户端运行时会重建被删除的会话，并用内存中的标题覆盖这里的改动。"
+            .to_string()
+    })
+}
+
+/// 删除**指定账号下的指定会话**（副本级删除，一次可传多条）。
+///
+/// 每条 `{uid, cid}` 依次处理三处，任何一步失败都如实回报、不吞：
+/// 1. **正文**：`projects/**/<cid>.jsonl` 移到 `<store_dir>/deleted-sessions/<region>/`
+///    （不做物理删除 —— 误删一份 30 MB 的历史会话是灾难，移走即可随时找回）；
+/// 2. **索引**：`sessions` 行把 `deleted_at` 置位（客户端随即不再列出该会话）；
+///    若该行本来就不存在，记 `dbUpdated=false`（不算失败）；
+/// 3. **登记**：复制账本里所有涉及该 cid 的边、基线表里所有涉及该 cid 的键一并删掉，
+///    否则组还挂在「关联会话」里，后续复制也会被当成「已复制」跳过。
+///
+/// ⚠️ 只处理传入的这一份副本，**不碰组内其他账号的副本** —— 这是本功能的全部意义。
+pub fn delete_session_copies_for(region: Region, items: &[Value]) -> Value {
+    let projects = build_projects_index_for(region);
+    let db_path = workbuddy_db_path_for(region);
+    let backup_dir = crate::modules::config::store_dir()
+        .join("deleted-sessions")
+        .join(region.as_str());
+
+    /* 账本与基线整批读写一次：逐条落盘会把两份 JSON 各写 N 遍。 */
+    let ledger_path = copy_ledger_path_for(region);
+    let baseline_path = session_baseline_path_for(region);
+    let mut ledger = load_copy_ledger_at(&ledger_path);
+    let mut baselines = load_session_baselines_at(&baseline_path);
+    let mut ledger_touched = false;
+    let mut baseline_touched = false;
+
+    let conn = open_db(&db_path, false);
+    let mut results: Vec<Value> = Vec::with_capacity(items.len());
+
+    for item in items {
+        let uid = item.get("uid").and_then(Value::as_str).unwrap_or("").trim();
+        let cid = item.get("cid").and_then(Value::as_str).unwrap_or("").trim();
+        if uid.is_empty() || cid.is_empty() {
+            results.push(json!({
+                "uid": uid, "cid": cid, "ok": false,
+                "error": "缺少账号 uid 或会话 id",
+            }));
+            continue;
+        }
+
+        /* 1. 正文 → 备份目录 */
+        let mut jsonl_moved = false;
+        let mut error: Option<String> = None;
+        if let Some(source) = projects.get(cid) {
+            if std::fs::create_dir_all(&backup_dir).is_ok() {
+                let target = backup_dir.join(format!("{cid}.jsonl"));
+                let moved = std::fs::rename(source, &target).is_ok()
+                    || (std::fs::copy(source, &target).is_ok()
+                        && std::fs::remove_file(source).is_ok());
+                jsonl_moved = moved;
+                if !moved {
+                    error = Some("会话正文移入备份目录失败（磁盘或权限）".to_string());
+                }
+            } else {
+                error = Some("无法创建备份目录".to_string());
+            }
+        }
+
+        /* 2. db 索引 → deleted_at 置位（先按 uid，再退化成仅 cid） */
+        let mut db_updated = false;
+        if let Some(conn) = conn.as_ref() {
+            let now = crate::modules::config::now_ms();
+            if let Ok(changed) = conn.execute(
+                "UPDATE sessions SET deleted_at = ?1 WHERE id = ?2 AND user_id = ?3 AND deleted_at IS NULL",
+                rusqlite::params![now, cid, uid],
+            ) {
+                db_updated = changed > 0;
+            }
+            if !db_updated {
+                /* 空归属行（`user_id` 为空）也要删掉，否则会以「别人的会话」继续留在索引里。 */
+                if let Ok(changed) = conn.execute(
+                    "UPDATE sessions SET deleted_at = ?1 WHERE id = ?2 AND (user_id IS NULL OR user_id = '' OR user_id = ?3)",
+                    rusqlite::params![now, cid, uid],
+                ) {
+                    db_updated = changed > 0;
+                }
+            }
+        }
+
+        /* 3. 账本边 + 基线键 */
+        let before = ledger.len();
+        ledger.retain(|key, value| {
+            let src_cid = key.rsplit('\u{1f}').next().unwrap_or_default();
+            let dst_cid = value.as_str().unwrap_or_default();
+            src_cid != cid && dst_cid != cid
+        });
+        let ledger_removed = before.saturating_sub(ledger.len());
+        ledger_touched |= ledger_removed > 0;
+
+        let baseline_before = baselines.len();
+        baselines.retain(|key, _| !key.split('\u{1e}').any(|part| part == cid));
+        let baseline_removed = baseline_before.saturating_sub(baselines.len());
+        baseline_touched |= baseline_removed > 0;
+
+        let ok = error.is_none() && (jsonl_moved || db_updated || ledger_removed > 0);
+        results.push(json!({
+            "uid": uid,
+            "cid": cid,
+            "ok": ok,
+            "jsonlMoved": jsonl_moved,
+            "dbUpdated": db_updated,
+            "ledgerRemoved": ledger_removed,
+            "baselineRemoved": baseline_removed,
+            "error": error,
+        }));
+    }
+
+    if ledger_touched {
+        let _ = save_copy_ledger_at(&ledger_path, &ledger);
+    }
+    if baseline_touched {
+        let _ = save_session_baselines_at(&baseline_path, &baselines);
+    }
+
+    let deleted = results
+        .iter()
+        .filter(|value| value.get("ok").and_then(Value::as_bool) == Some(true))
+        .count();
+    json!({
+        "results": results,
+        "deleted": deleted,
+        "backupDir": backup_dir.to_string_lossy(),
+    })
+}
+
 /// 清除「会话关联」的全部本地登记：复制账本 + 基线表 + 内容指纹缓存。
 ///
 /// ⚠️ 只删**本工具自己的**三份文件，不碰 `~/.workbuddy` 下的任何会话 —— 换机后
@@ -3495,6 +3637,73 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    /// 副本删除：正文移入备份、索引软删、账本与基线同步清理 —— 三处都得动。
+    ///
+    /// 这是**破坏性**操作，所以断言到文件与库的最终状态，而不是只看返回值。
+    #[test]
+    fn delete_session_copies_clears_body_index_and_ledger() {
+        let root = std::env::temp_dir().join(format!(
+            "buddy-switch-delete-copy-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let projects = root.join(".workbuddy").join("projects").join("ws");
+        std::fs::create_dir_all(&projects).expect("create projects");
+        let body = projects.join("cid-a.jsonl");
+        std::fs::write(&body, b"{\"type\":\"message\"}\n").expect("seed jsonl");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&root);
+
+        let conn = rusqlite::Connection::open(workbuddy_db_path_for(Region::Cn)).expect("open db");
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT, user_id TEXT, title TEXT, cwd TEXT, deleted_at INTEGER);\
+             INSERT INTO sessions (id, user_id, title, cwd, deleted_at) \
+             VALUES ('cid-a','uid-1','t','ws',NULL);",
+        )
+        .expect("seed sessions");
+        drop(conn);
+
+        let ledger_path = copy_ledger_path_for(Region::Cn);
+        let mut ledger = serde_json::Map::new();
+        ledger.insert(
+            format!("uid-1{sep}uid-2{sep}cid-a", sep = '\u{1f}'),
+            json!("cid-b"),
+        );
+        assert!(save_copy_ledger_at(&ledger_path, &ledger));
+        let baseline_path = session_baseline_path_for(Region::Cn);
+        let mut baselines = serde_json::Map::new();
+        baselines.insert("cid-a\u{1e}cid-b".to_string(), json!({ "lineCount": 3 }));
+        assert!(save_session_baselines_at(&baseline_path, &baselines));
+
+        let result =
+            delete_session_copies_for(Region::Cn, &[json!({ "uid": "uid-1", "cid": "cid-a" })]);
+        assert_eq!(result["deleted"], 1, "{result:?}");
+
+        assert!(!body.exists(), "正文应已移走");
+        let backup = crate::modules::config::store_dir()
+            .join("deleted-sessions")
+            .join("cn")
+            .join("cid-a.jsonl");
+        assert!(backup.is_file(), "正文应在备份目录：{}", backup.display());
+
+        let conn = rusqlite::Connection::open(workbuddy_db_path_for(Region::Cn)).expect("reopen");
+        let deleted_at: Option<i64> = conn
+            .query_row("SELECT deleted_at FROM sessions WHERE id='cid-a'", [], |row| {
+                row.get(0)
+            })
+            .expect("row");
+        assert!(deleted_at.is_some(), "索引行应被软删");
+
+        assert!(
+            load_copy_ledger_at(&ledger_path).is_empty(),
+            "账本里涉及该 cid 的边应被清掉"
+        );
+        assert!(
+            load_session_baselines_at(&baseline_path).is_empty(),
+            "基线里涉及该 cid 的键应被清掉"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

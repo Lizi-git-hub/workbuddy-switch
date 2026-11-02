@@ -183,6 +183,8 @@ export const en = {
   "wbAccounts.dialog.listSeparator": "; ",
   "wbAccounts.dialog.switchProcessing": "Processing, please don't close this window",
   "wbAccounts.dialog.copySessions": "Copy sessions to target account",
+  "wbAccounts.dialog.onlyActionable": "Only show what needs work (unlinked / behind / title mismatch)",
+  "wbAccounts.dialog.alreadyLinked": "{n} linked and identical session(s) hidden",
   "wbAccounts.dialog.emptySessionsHidden": "Hid {n} empty sessions (indexed but with no local session file)",
   "wbAccounts.dialog.copyHintLoading": "Loading sessions…",
   "wbAccounts.dialog.copyHintErrorEmpty": "Can't load the session list; copying is unavailable",

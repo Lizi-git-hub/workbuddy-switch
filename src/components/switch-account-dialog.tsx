@@ -1,5 +1,5 @@
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Inbox, Loader2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -16,6 +16,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { accountIdentity, accountDisplayName, identityDisplayName } from "@/components/account-card";
 import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
@@ -42,6 +43,8 @@ import {
   type SessionDirNode,
   type SessionTypeNode,
 } from "@/lib/session-tree";
+import { sessionNeedsCopy } from "@/lib/session-replicas";
+import { useSessionsStore } from "@/stores/sessions";
 import type { AccountMeta, MigrateResult, Region, Session } from "@/lib/types";
 
 /** WorkBuddy 桌面客户端的显示名（商标，中英写法相同 ⇒ 不放进词表）。 */
@@ -93,6 +96,11 @@ export function SwitchAccountDialog({
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [copySessions, setCopySessions] = useState(false);
+  /* 「只看需要处理的」：默认开 —— 两个号已关联且内容一致时，弹窗只列真正要动的会话，
+     不再让用户对着一整排已复制的会话重复勾选。 */
+  const [onlyActionable, setOnlyActionable] = useState(true);
+  const replicaGroups = useSessionsStore((state) => state.groups);
+  const loadReplicaGroups = useSessionsStore((state) => state.load);
   /** 把来源账号的长期记忆合并进目标账号（带去重）。 */
   const [migrateMemory, setMigrateMemory] = useState(false);
   /**
@@ -249,11 +257,31 @@ export function SwitchAccountDialog({
     };
   }, [open, crossScope, region]);
 
+  /* 副本组只在「要复制会话」时才需要（拉一次，store 里有缓存）。 */
+  useEffect(() => {
+    if (!open || !copySessions) return;
+    void loadReplicaGroups(sourceRegion ?? region ?? "cn");
+  }, [open, copySessions, loadReplicaGroups, sourceRegion, region]);
+
   /* ── 派生值 ───────────────────────────────────────────────── */
 
   const targetRegion: Region = region ?? "cn";
   const crossRegion = sourceRegion !== targetRegion;
-  const tree = buildSessionTree(sessions, t);
+  /* 目标账号 uid（账本顶点用的就是它）。跨版本时无法比对两份账本 ⇒ 不做过滤。 */
+  const targetUid = account?.uid ?? "";
+  const canCompare = Boolean(targetUid) && !crossRegion && currentUid !== null;
+  const usableSessions = useMemo(() => {
+    if (!onlyActionable || !canCompare || currentUid === null) return sessions;
+    return sessions.filter((session) =>
+      sessionNeedsCopy(session, currentUid ?? "", targetUid, replicaGroups),
+    );
+  }, [onlyActionable, canCompare, currentUid, targetUid, sessions, replicaGroups]);
+  const alreadyLinked = sessions.length - usableSessions.length;
+  const usableIds = useMemo(
+    () => new Set(usableSessions.map((session) => session.id)),
+    [usableSessions],
+  );
+  const tree = buildSessionTree(usableSessions, t);
   const stats = treeSelectionStats(tree, selected);
   /* 空壳会话（db 有行、本机没 jsonl）被 `buildSessionTree` 过滤掉了 ⇒ 空态判据必须看树，
      否则「只有空壳」时会露出一棵空树而不是空态。 */
@@ -379,7 +407,7 @@ export function SwitchAccountDialog({
         // 只有「跨版本」时才显式带来源版本：同版本时它由后端缺省为目标 region，
         // 少传一个字段就少一处与后端默认值漂移的机会。
         sourceRegion: sourceRegion === region ? undefined : sourceRegion,
-        copySessionIds: copySessions ? [...selected] : undefined,
+        copySessionIds: copySessions ? [...selected].filter((id) => usableIds.has(id)) : undefined,
       });
       const nickname =
         accountDisplayName(account);
@@ -623,6 +651,25 @@ export function SwitchAccountDialog({
                       />
                     ) : (
                       <>
+                        {/* 「只看需要处理的」：默认开 —— 已关联且一致的会话不再列出，
+                            避免用户对着两号之间早就同步好的列表重复勾选。 */}
+                        {canCompare ? (
+                          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            <label className="flex cursor-pointer items-center gap-1.5">
+                              <Checkbox
+                                checked={onlyActionable}
+                                onCheckedChange={(next) => setOnlyActionable(next === true)}
+                                data-only-actionable
+                              />
+                              {t("wbAccounts.dialog.onlyActionable")}
+                            </label>
+                            {onlyActionable && alreadyLinked > 0 ? (
+                              <span data-already-linked>
+                                {t("wbAccounts.dialog.alreadyLinked", { n: alreadyLinked })}
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : null}
                         {hiddenEmptySessions > 0 ? (
                           <p className="mb-2 text-xs text-muted-foreground">
                             {t("wbAccounts.dialog.emptySessionsHidden", { n: hiddenEmptySessions })}

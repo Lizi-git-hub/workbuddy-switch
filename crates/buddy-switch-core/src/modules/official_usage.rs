@@ -48,7 +48,9 @@ pub const OFFICIAL_USAGE_PAGE_SIZE: usize = 3_000;
 
 pub const OFFICIAL_USAGE_DETAIL_LIMIT: usize = 3_000;
 
-const OFFICIAL_USAGE_MAX_PAGES: usize = 100;
+/// 连续扫描的**轮数**上限：每轮最多 [`OFFICIAL_USAGE_PAGE_SIZE`] 条，100 轮足够覆盖
+/// 单账号单窗口的任何真实量级，同时兜住「服务端异常回同样一页」的死循环。
+const OFFICIAL_USAGE_MAX_ROUNDS: usize = 100;
 
 /// 官方用量采集结果的进程内记忆，**按 region 分家**。
 ///
@@ -282,6 +284,9 @@ struct RequestRow {
 
 #[derive(Clone, Debug)]
 struct OfficialPage {
+    /// ⚠️ 服务端的 `total` **不再参与任何判断**（取满 3000 条时它会被截断成页大小，
+    /// 拿它当「还有下一页」的依据会直接漏掉最新记录）。字段保留只为读接口时不 panic。
+    #[allow(dead_code)]
     total: usize,
     raw_len: usize,
     rows: Vec<RequestRow>,
@@ -451,13 +456,58 @@ fn parse_page(response: &Value) -> Result<OfficialPage, String> {
     })
 }
 
-fn should_fetch_next_page(
-    page_number: usize,
-    total: usize,
-    fetched_raw: usize,
+/// 本轮之后如何继续扫描。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SweepDecision {
+    /// 本轮没取满：窗口内的记录已经取完。
+    Complete,
+    /// 本轮取满：从该时间戳（含）继续向后取。
+    Continue(i64),
+    /// 本轮取满但起点无法推进（记录挤在同一时间点）：停止并保留已取到的数据。
+    Stalled,
+}
+
+fn decide_sweep(
     page_len: usize,
-) -> bool {
-    page_len > 0 && fetched_raw < total && page_number < OFFICIAL_USAGE_MAX_PAGES
+    newest_ts: Option<i64>,
+    previous_newest: Option<i64>,
+) -> SweepDecision {
+    if page_len < OFFICIAL_USAGE_PAGE_SIZE {
+        return SweepDecision::Complete;
+    }
+    let Some(newest_ts) = newest_ts else {
+        return SweepDecision::Stalled;
+    };
+    match previous_newest {
+        Some(previous) if newest_ts <= previous => SweepDecision::Stalled,
+        _ => SweepDecision::Continue(newest_ts),
+    }
+}
+
+/// 下一轮起点（含边界那条，靠去重去掉重复），格式对齐接口要求。
+fn start_time_at(ts: i64) -> Option<String> {
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+/// 合并一轮结果：只保留窗口内的记录，并按 `(requestId, requestTime)` 去重。
+fn merge_rows(
+    rows: &mut Vec<RequestRow>,
+    seen_request_ids: &mut HashSet<(String, i64)>,
+    incoming: Vec<RequestRow>,
+    range_start: NaiveDate,
+    range_end: NaiveDate,
+) {
+    for row in incoming
+        .into_iter()
+        .filter(|row| row.date >= range_start && row.date <= range_end)
+    {
+        if seen_request_ids.insert((row.request_id.clone(), row.request_ts)) {
+            rows.push(row);
+        }
+    }
 }
 
 fn local_date_at(ts: i64) -> NaiveDate {
@@ -474,13 +524,20 @@ async fn fetch_account_usage_for(
     range_start: NaiveDate,
     range_end: NaiveDate,
 ) -> Result<AccountFetch, String> {
-    let start_time = format!("{range_start} 00:00:00");
+    /* ⚠️ **不能用 pageNum 递增分页**：服务端单次最多回 3000 条，且超出时保留区间内
+       **最早的一批**（`total` 也一起被截断成同一个数），翻到第 2 页拿到的还是那批旧记录。
+       结果是「今天刚发生的请求一条都取不到」，`usageToday` 恒为 0 —— 现场就表现为
+       「我一直在用这个账号，积分却显示 0」。
+       正确做法是**游标推进**：每轮都从 `pageNum=1` 取，取满就把起点推到本轮最新一条的
+       时间戳，直到某一轮取不满为止。相邻轮在边界时间戳上必然重复，靠 `(requestId, ts)`
+       去重兜住。 */
     let end_time = format!("{range_end} 23:59:59");
-    let mut page_number = 1;
-    let mut fetched_raw = 0;
-    let mut reported_total = 0;
-    let mut rows = Vec::new();
-    let mut seen_request_ids = HashSet::new();
+    let mut start_time = format!("{range_start} 00:00:00");
+    let mut rounds = 0usize;
+    let mut fetched_raw = 0usize;
+    let mut rows: Vec<RequestRow> = Vec::new();
+    let mut seen_request_ids: HashSet<(String, i64)> = HashSet::new();
+    let mut previous_newest: Option<i64> = None;
 
     loop {
         let response = authenticated_post_for(
@@ -490,40 +547,45 @@ async fn fetch_account_usage_for(
             json!({
                 "startTime": start_time,
                 "endTime": end_time,
-                "pageNum": page_number,
+                "pageNum": 1,
                 "pageSize": OFFICIAL_USAGE_PAGE_SIZE,
             }),
         )
         .await;
         let page = parse_page(&response)?;
-        reported_total = reported_total.max(page.total);
         fetched_raw += page.raw_len;
-        for row in page
-            .rows
-            .into_iter()
-            .filter(|row| row.date >= range_start && row.date <= range_end)
-        {
-            if seen_request_ids.insert((row.request_id.clone(), row.request_ts)) {
-                rows.push(row);
-            }
-        }
+        let newest_ts = page.rows.iter().map(|row| row.request_ts).max();
+        merge_rows(
+            &mut rows,
+            &mut seen_request_ids,
+            page.rows,
+            range_start,
+            range_end,
+        );
 
-        if !should_fetch_next_page(page_number, reported_total, fetched_raw, page.raw_len) {
-            if page.raw_len == 0 && fetched_raw < reported_total {
-                return Err("官方用量分页数据不完整".to_string());
+        match decide_sweep(page.raw_len, newest_ts, previous_newest) {
+            SweepDecision::Complete => break,
+            SweepDecision::Stalled => {
+                eprintln!("[官方用量] 取数起点无法继续推进，已保留 {} 条记录", rows.len());
+                break;
             }
-            if page_number >= OFFICIAL_USAGE_MAX_PAGES && fetched_raw < reported_total {
-                return Err("官方用量分页超过安全上限".to_string());
+            SweepDecision::Continue(ts) => {
+                rounds += 1;
+                if rounds >= OFFICIAL_USAGE_MAX_ROUNDS {
+                    return Err("官方用量分页超过安全上限".to_string());
+                }
+                start_time = start_time_at(ts)
+                    .ok_or_else(|| "官方用量分页时间无效".to_string())?;
+                previous_newest = Some(ts);
             }
-            break;
         }
-        page_number += 1;
     }
 
     Ok(AccountFetch {
-        rows,
-        reported_total,
+        /* 服务端的 `total` 不可信（取满时被截断成页大小）⇒ 回报实际取回并去重后的条数。 */
+        reported_total: rows.len(),
         fetched_raw,
+        rows,
     })
 }
 
@@ -876,28 +938,67 @@ mod tests {
         assert_eq!(page.rows[0].credit, 2.0);
     }
 
+    /// 连续扫描的续扫判据（**取代旧的 pageNum 分页**）。
+    ///
+    /// 现场（2026-11-02）：旧实现按 `pageNum` 递增翻页，而服务端「取满 3000 条就只回
+    /// 区间里**最早**的一批」⇒ 今天新产生的请求一条都取不到，`usageToday` 恒为 0
+    /// （用户原话：「我一直在用这个账号，积分却显示 0」）。
+    /// 现在的判据是：**没取满 = 扫完**；取满就推到本轮最新时间戳继续；推不动（同一时间点
+    /// 挤了 3000 条以上）就停下并保留已有数据，绝不空转。
     #[test]
-    fn pagination_stops_on_empty_short_total_and_page_limit() {
-        assert!(!should_fetch_next_page(1, 10, 0, 0));
-        assert!(should_fetch_next_page(1, 10, 2, 2));
-        assert!(!should_fetch_next_page(
-            1,
-            2_000,
-            2_000,
-            OFFICIAL_USAGE_PAGE_SIZE
-        ));
-        assert!(should_fetch_next_page(
-            1,
-            6_000,
-            OFFICIAL_USAGE_PAGE_SIZE,
-            OFFICIAL_USAGE_PAGE_SIZE
-        ));
-        assert!(!should_fetch_next_page(
-            OFFICIAL_USAGE_MAX_PAGES,
-            usize::MAX,
-            OFFICIAL_USAGE_PAGE_SIZE * OFFICIAL_USAGE_MAX_PAGES,
-            OFFICIAL_USAGE_PAGE_SIZE,
-        ));
+    fn sweep_continues_from_newest_timestamp_and_stops_on_stall() {
+        // 没取满 ⇒ 窗口内取完了，不必再请求。
+        assert_eq!(
+            decide_sweep(OFFICIAL_USAGE_PAGE_SIZE - 1, Some(1_000), None),
+            SweepDecision::Complete
+        );
+        // 取满且拿到了更新的时间戳 ⇒ 从该时间戳继续。
+        assert_eq!(
+            decide_sweep(OFFICIAL_USAGE_PAGE_SIZE, Some(2_000), Some(1_000)),
+            SweepDecision::Continue(2_000)
+        );
+        // 取满但时间戳没推进（同一秒挤满一页）⇒ 停，保留已取到的数据。
+        assert_eq!(
+            decide_sweep(OFFICIAL_USAGE_PAGE_SIZE, Some(2_000), Some(2_000)),
+            SweepDecision::Stalled
+        );
+        // 取满却一条可解析的行都没有 ⇒ 同样按停处理，避免死循环。
+        assert_eq!(
+            decide_sweep(OFFICIAL_USAGE_PAGE_SIZE, None, None),
+            SweepDecision::Stalled
+        );
+    }
+
+    /// 相邻两轮在边界时间戳上必然重复，合并必须按 `(requestId, requestTime)` 去重；
+    /// 窗口外的记录一并丢掉（接口可能回多一天）。
+    #[test]
+    fn merge_rows_dedups_boundary_and_drops_out_of_window() {
+        let today = Local::now().date_naive();
+        let inside = today;
+        let outside = today - Duration::days(40);
+        let mut rows: Vec<RequestRow> = Vec::new();
+        let mut seen: HashSet<(String, i64)> = HashSet::new();
+        merge_rows(
+            &mut rows,
+            &mut seen,
+            vec![row(inside, 1_000, 1.0), row(inside, 2_000, 2.0)],
+            today - Duration::days(30),
+            today,
+        );
+        // 第二轮：边界那条重复 + 一条新记录 + 一条窗口外。
+        merge_rows(
+            &mut rows,
+            &mut seen,
+            vec![
+                row(inside, 2_000, 2.0),
+                row(inside, 3_000, 3.0),
+                row(outside, 4_000, 9.0),
+            ],
+            today - Duration::days(30),
+            today,
+        );
+        assert_eq!(rows.len(), 3, "边界那条只应保留一份，窗口外的丢掉");
+        assert_eq!(rows.iter().map(|r| r.credit).sum::<f64>(), 6.0);
     }
 
     #[test]

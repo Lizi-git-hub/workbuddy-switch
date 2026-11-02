@@ -338,3 +338,48 @@ export function lostLinesFor(group: SessionGroupView, sessionId: string): number
   const delta = group.deltas.get(sessionId);
   return delta === undefined ? null : delta;
 }
+
+/**
+ * 切号弹窗用：**目标账号是否还需要这份会话**。
+ *
+ * 返回 `true` 的四类情形（其余一律 `false` = 已关联且一致，不必再复制）：
+ * 1. 这个会话从来没复制过（不在任何副本组里）；
+ * 2. 目标账号里没有它的副本；
+ * 3. 源比目标**新**（相对共同旧版的新增条数更多）；
+ * 4. 两边标题不一致，或目标那份的正文不在本机（`hasHistory === false`）。
+ *
+ * ⚠️ 内容状态为 `unknown`（指纹取不到）时不臆断 —— 直接当作「需要处理」，
+ * 宁可让用户多看一眼，也不要替他把真实差异藏起来。
+ */
+export function sessionNeedsCopy(
+  session: Session,
+  sourceUid: string,
+  targetUid: string,
+  groups: SessionGroupView[],
+): boolean {
+  const group =
+    groups.find((item) =>
+      item.rows.some((row) => row.sessionId === session.id && row.accountUid === sourceUid),
+    ) ?? groups.find((item) => item.rows.some((row) => row.sessionId === session.id));
+  if (!group) return true;
+  const target = group.rows.find((row) => row.accountUid === targetUid);
+  if (!target) return true;
+  if (target.hasHistory === false) return true;
+
+  /* 内容：未知一律按「需要处理」；已知则比较相对共同旧版的增量。 */
+  if (group.status === "unknown") return true;
+  const sourceDelta = group.deltas.get(session.id);
+  const targetDelta = group.deltas.get(target.sessionId);
+  if (
+    sourceDelta !== undefined &&
+    targetDelta !== undefined &&
+    sourceDelta > targetDelta
+  ) {
+    return true;
+  }
+
+  const sourceTitle = group.titles.get(session.id) ?? session.title;
+  const targetTitle = group.titles.get(target.sessionId);
+  if (sourceTitle && targetTitle && sourceTitle !== targetTitle) return true;
+  return false;
+}

@@ -53,6 +53,28 @@ export default function SessionsPage() {
   /* 「清除关联缓存」的确认弹窗 / 执行态 —— 破坏性动作必须二次确认（与删除账号同一套规矩）。 */
   const [clearOpen, setClearOpen] = useState(false);
   const [clearBusy, setClearBusy] = useState(false);
+  /* 客户端是否在运行：删除 / 同步 / 统一标题都会改写会话文件与索引，
+     客户端运行时这些改动会被重建或覆盖 ⇒ 页面上先说清楚，别等用户点了才报错。 */
+  const [clientRunning, setClientRunning] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const probe = () => {
+      void api
+        .getStatus(region)
+        .then((status) => {
+          if (!cancelled) setClientRunning(Boolean(status.running));
+        })
+        .catch(() => undefined);
+    };
+    probe();
+    /* `get_status` 在 Windows 上会起一次 tasklist（几十毫秒），30 秒一次足够，
+       不会与页面其它请求打架。 */
+    const timer = window.setInterval(probe, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [region]);
 
   const [syncBusy, setSyncBusy] = useState(false);
   const [busyGroupKeys, setBusyGroupKeys] = useState<ReadonlySet<string>>(new Set());
@@ -407,6 +429,9 @@ export default function SessionsPage() {
             onSyncGroup={syncGroup}
             busyGroupKeys={busyGroupKeys}
             onUnifyGroup={setUnifyTarget}
+            region={region}
+            onDeleted={() => void load(region)}
+            blockedReason={clientRunning ? t("sessions.clientRunning.desc") : null}
           />
         </>
       ) : (

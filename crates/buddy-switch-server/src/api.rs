@@ -237,6 +237,8 @@ fn api_routes() -> Router {
         .route("/api/sessions/replicas", get(api_session_replicas))
         // 清除本工具自己的会话关联登记（复制账本 / 基线 / 指纹缓存），不动任何会话文件。
         .route("/api/sessions/clear-cache", post(api_session_clear_cache))
+        // 删除指定账号下的指定会话（副本级删除，正文移入备份目录）。
+        .route("/api/sessions/delete-copies", post(api_session_delete_copies))
         // P8 · 安全同步（增量追加）—— **写操作**：只往目标 jsonl 追加，绝不改写已有内容。
         .route("/api/sessions/sync", post(api_session_sync))
         .route("/api/sessions/unify", post(api_session_unify))
@@ -2346,6 +2348,23 @@ async fn api_session_replicas(RawQuery(query): RawQuery) -> Response {
     json_ok(session::list_replica_groups_for(region))
 }
 
+async fn api_session_delete_copies(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    if let Some(reason) = session::client_write_block(region) {
+        return json_err(reason, StatusCode::CONFLICT);
+    }
+    let items = body
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    json_ok(session::delete_session_copies_for(region, &items))
+}
+
 async fn api_session_clear_cache(RawQuery(query): RawQuery) -> Response {
     if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
     {
@@ -2361,6 +2380,9 @@ async fn api_session_sync(Json(body): Json<Value>) -> Response {
         return json_err(error, StatusCode::FORBIDDEN);
     }
     let region = parse_region(body.get("region").and_then(Value::as_str));
+    if let Some(reason) = session::client_write_block(region) {
+        return json_err(reason, StatusCode::CONFLICT);
+    }
     let items = body
         .get("items")
         .and_then(Value::as_array)
@@ -2375,6 +2397,9 @@ async fn api_session_unify(Json(body): Json<Value>) -> Response {
         return json_err(error, StatusCode::FORBIDDEN);
     }
     let region = parse_region(body.get("region").and_then(Value::as_str));
+    if let Some(reason) = session::client_write_block(region) {
+        return json_err(reason, StatusCode::CONFLICT);
+    }
     let items = body
         .get("items")
         .and_then(Value::as_array)
@@ -2892,8 +2917,14 @@ async fn api_token_statistics(RawQuery(query): RawQuery) -> Response {
             .split('&')
             .find_map(|part| part.strip_prefix("days=")?.parse::<i64>().ok())
     });
-    match tokio::task::spawn_blocking(move || token_stats::get_statistics_for_filter(filter, days))
-        .await
+    let force = query_value(query.as_deref(), "force")
+        .as_deref()
+        .map(|value| value == "1" || value == "true")
+        .unwrap_or(false);
+    match tokio::task::spawn_blocking(move || {
+        token_stats::get_statistics_for_filter_forced(filter, days, force)
+    })
+    .await
     {
         Ok(statistics) => json_ok(statistics),
         Err(error) => json_err(

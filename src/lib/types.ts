@@ -524,6 +524,35 @@ export interface SessionReplicaResponse {
   staleGroups?: number;
 }
 
+/** 删除一条「某账号里的某会话」副本（副本级删除，不影响组内其他账号）。 */
+export interface DeleteSessionCopyItem {
+  uid: string;
+  cid: string;
+}
+
+/** 单条删除的结果（后端逐条回报，不吞失败）。 */
+export interface DeleteSessionCopyResult {
+  uid: string;
+  cid: string;
+  ok: boolean;
+  /** 正文是否已移入备份目录（`<数据目录>/deleted-sessions/<region>/`）。 */
+  jsonlMoved: boolean;
+  /** `sessions` 行是否被置 `deleted_at`（行本来就不存在时为 false，不算失败）。 */
+  dbUpdated: boolean;
+  /** 复制账本里被删掉的边数。 */
+  ledgerRemoved: number;
+  /** 基线表里被删掉的键数。 */
+  baselineRemoved: number;
+  error?: string | null;
+}
+
+export interface DeleteSessionCopiesResponse {
+  results: DeleteSessionCopyResult[];
+  deleted: number;
+  /** 正文的落点（用户要找回时按这个路径去翻）。 */
+  backupDir: string;
+}
+
 /** 「清除会话关联缓存」的返回：删掉的文件名（不含路径）与删不掉的文件名。 */
 export interface SessionCacheClearResponse {
   removed: string[];

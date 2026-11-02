@@ -15,7 +15,7 @@ import { CreditExpiryBars } from "@/components/usage/credit-expiry-bars";
 import { formatCredits, signedCredits } from "@/components/usage/format";
 import { StackedDailyBar } from "@/components/usage/stacked-daily-bar";
 import { StatTiles, type StatTile } from "@/components/usage/stat-tiles";
-import { CreditLedgerTable, LEDGER_CLIENT_COLOR, LEDGER_GATEWAY_COLOR } from "@/components/usage/ledger-parts";
+import { LEDGER_CLIENT_COLOR, LEDGER_GATEWAY_COLOR } from "@/components/usage/ledger-parts";
 import { useUsageWindowLabel, type UsageViewProps } from "@/components/usage/view-param-bar";
 import * as api from "@/lib/api";
 import { balanceCaption, singleSideCaption } from "@/lib/chart-caption";
@@ -41,7 +41,6 @@ import { balanceCurve, creditDailyBars, expiryBuckets, mergeSources, type DailyM
 import {
   LEDGER_CLIENT_SEGMENT,
   LEDGER_GATEWAY_SEGMENT,
-  clientCreditByModel,
   clientCreditDaily,
   creditDailySeries,
   mergeDims,
@@ -328,11 +327,6 @@ export default function CreditStatsPage({
       }),
     [bars, clientCreditMap, gatewayCreditMap, ledger],
   );
-  const clientCreditRows = useMemo(
-    () => (tokenSource ? clientCreditByModel(tokenSource, viewWindow) : []),
-    [tokenSource, viewWindow],
-  );
-  const clientCreditTotal = clientCreditRows.reduce((sum, row) => sum + row.credit, 0);
 
   const tiles: StatTile[] = [
     {
@@ -439,21 +433,19 @@ export default function CreditStatsPage({
               </span>
             )}
             <div className="grow" />
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void run(() => load(region, true))}
-              disabled={busy || loading}
-            >
-              {busy || loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              {t("wbStats.credit.refreshCredits")}
-            </Button>
+            {/* 「刷新积分」按钮已删除：页头的「刷新统计」一次重算积分 + Token，
+                两个按钮做同一件事只会让人不知道该点哪个。积分仍按 10 分钟自动刷新。 */}
           </div>
 
           <StatTiles tiles={tiles} ariaLabel={t("wbStats.credit.overviewAria")} />
 
-          {/* 客户端账本：全宽单表（原来与网关表并排，只剩一张时会被挤成半宽）。 */}
-          <CreditLedgerTable book="client" rows={clientCreditRows} total={clientCreditTotal} />
+          {/* 「本机会话账本」已移除。
+              原因（实测数据）：这张表的积分取自会话 jsonl 的 `providerData.rawUsage.credit`，
+              ① 它**按请求标价**，与官方账单的实际扣费不是一回事；
+              ② 同组副本会被各算一遍（`dailyByModel` 没有参与副本去重）——
+                 11-01 本地 947.9 vs 官方 193.67，差 4.9 倍，倍数正好等于副本份数。
+              两个偏差叠在一起，用户看到的永远是「跟官方对不上」的数。积分一律以官方为准，
+              本机只保留 Token 口径（在「Token」页签）。 */}
 
           {accountCount > 0 ? (
             <section className="min-w-0 space-y-2.5" aria-labelledby="credit-resource-title">

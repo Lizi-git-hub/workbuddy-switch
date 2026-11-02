@@ -1339,6 +1339,18 @@ pub async fn list_session_replicas(region: Option<String>) -> Result<Value, Stri
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn delete_session_copies(items: Vec<Value>, region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    if let Some(reason) = session::client_write_block(region) {
+        return Err(reason);
+    }
+    tauri::async_runtime::spawn_blocking(move || session::delete_session_copies_for(region, &items))
+        .await
+        .map_err(|error| format!("删除会话副本失败: {error}"))
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn clear_session_cache(region: Option<String>) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
@@ -1354,6 +1366,9 @@ pub async fn sync_session_replicas(
 ) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
+    if let Some(reason) = session::client_write_block(region) {
+        return Err(reason);
+    }
     tauri::async_runtime::spawn_blocking(move || session::sync_session_replicas_for(region, &items))
         .await
         .map_err(|error| format!("同步会话副本失败: {error}"))
@@ -1366,6 +1381,9 @@ pub async fn unify_session_replicas(
 ) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
+    if let Some(reason) = session::client_write_block(region) {
+        return Err(reason);
+    }
     tauri::async_runtime::spawn_blocking(move || {
         session::unify_session_replicas_for(region, &items)
     })
@@ -1644,10 +1662,12 @@ pub async fn get_credit_statistics(refresh: Option<bool>, region: Option<String>
 pub async fn get_token_statistics(
     days: Option<i64>,
     region: Option<String>,
+    force: Option<bool>,
 ) -> Result<Value, String> {
     let filter = parse_region_filter(region.as_deref());
+    let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        token_stats::get_statistics_for_filter(filter, days)
+        token_stats::get_statistics_for_filter_forced(filter, days, force)
     })
     .await
     .map_err(|error| format!("扫描 Token 统计失败: {error}"))

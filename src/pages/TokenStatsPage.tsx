@@ -45,7 +45,7 @@
  *   截断由渲染层显式说明「共 M 个」，统计 tile 仍按全量算。理由见该常量注释）。
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, CircleAlert, Gauge, Info, Loader2, MessagesSquare, Percent, RefreshCw, Server, TrendingUp, Users } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -795,9 +795,13 @@ export default function TokenStatsPage({
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
 
-  /* 页头「刷新统计」：序号变化 ⇒ 走内部 reload（真正重新拉 stats）。 */
+  /* 页头「刷新统计」：序号变化 ⇒ 置一次「强制重扫」标记后重跑取数。
+     ⚠️ 只重挂载不够：后端按 (mtime,size) 缓存，文件没变就会复用旧读数 ——
+     而用户点刷新要的是「重新算一遍」这个动作本身。 */
+  const forceNextRef = useRef(false);
   useEffect(() => {
     if ((refreshSeq ?? 0) <= 0) return;
+    forceNextRef.current = true;
     setReload((value) => value + 1);
   }, [refreshSeq]);
   /* 三处「重试 / 刷新」出口（错误 Alert、两种空态）共用同一个 reload 触发 ⇒ 共用一个实例。 */
@@ -813,8 +817,10 @@ export default function TokenStatsPage({
     let disposed = false;
     setLoading(true);
     setError(null);
+    const force = forceNextRef.current;
+    forceNextRef.current = false;
     api
-      .getTokenStatistics(undefined, region)
+      .getTokenStatistics(undefined, region, force)
       .then((result) => {
         if (disposed) return;
         statisticsCache[region] = result;

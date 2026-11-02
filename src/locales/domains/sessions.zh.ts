@@ -9,6 +9,21 @@ export const zh = {
   "sessions.toolbar.client": "WorkBuddy 桌面",
   /* 卡片头部（原型 `.sg-head`）：状态徽标 +「N 个副本」；以及可点区的无障碍标签。 */
   /* 「清除关联缓存」：换机后旧账本残留的出口。只删本工具自己的登记，不动会话文件。 */
+  /* 副本删除：按账号粒度删「这个账号里的这份会话」，其他副本不动。 */
+  /* 客户端运行中的写操作闸门（删除 / 同步 / 统一标题都会改写会话文件与索引）。 */
+  "sessions.clientRunning.title": "WorkBuddy 正在运行",
+  "sessions.clientRunning.desc": "WorkBuddy 正在运行：请先完全退出客户端（含托盘）再做删除、同步或统一标题 —— 客户端会重建被删除的会话，并用内存中的标题覆盖这里的改动。",
+  "sessions.delete.action": "删除所选副本（{n}）",
+  "sessions.delete.selectAll": "全选",
+  "sessions.delete.clearAll": "取消全选",
+  "sessions.delete.rowAria": "选择 {name} 的这份副本",
+  "sessions.delete.title": "删除 {n} 份副本？",
+  "sessions.delete.desc": "只删除你勾选的这些副本：正文移到备份目录（可手动找回），索引标记为已删除，复制记录一并清理。组内其他账号的同一会话不受影响。",
+  "sessions.delete.confirm": "删除",
+  "sessions.delete.cancel": "取消",
+  "sessions.delete.done": "已删除 {n} 份副本",
+  "sessions.delete.partial": "{n} 份未能删除",
+  "sessions.delete.fail": "删除失败：{error}",
   "sessions.cache.clear": "清除关联缓存",
   "sessions.cache.clearHint": "清除复制账本、上次一致点与内容指纹缓存",
   "sessions.cache.clearTitle": "清除会话关联缓存？",

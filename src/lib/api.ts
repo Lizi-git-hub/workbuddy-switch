@@ -65,6 +65,8 @@ import type {
   ScheduleConfig,
   ScheduleRunResult,
   Session,
+  DeleteSessionCopiesResponse,
+  DeleteSessionCopyItem,
   SessionCacheClearResponse,
   SessionReplicaResponse,
   SkillCopyReport,
@@ -370,6 +372,8 @@ const ROUTES: Record<string, Route> = {
   list_session_replicas: { method: "GET", path: "/api/sessions/replicas" },
   // 清除本工具的会话关联登记（账本/基线/指纹缓存），**不动**任何会话文件。
   clear_session_cache: { method: "POST", path: "/api/sessions/clear-cache" },
+  // 删除指定账号下的指定会话（正文移入备份目录，索引软删，账本同步清理）。
+  delete_session_copies: { method: "POST", path: "/api/sessions/delete-copies" },
   // P14 S4a · VS Code 插件 / CodeBuddy IDE 的会话仓（**与桌面版不是同一套存储**，
   // 所以单开路由而不是往 `/api/sessions` 塞 `client` 参数）。
   list_vscode_sessions: { method: "GET", path: "/api/vscode-sessions" },
@@ -1316,6 +1320,19 @@ export function listSessionReplicas(region?: Region): Promise<SessionReplicaResp
  * ⚠️ 只删本工具自己的三份文件，**不碰** `~/.workbuddy` 里的任何会话。
  * 换机后旧账本被一起搬过来、本机又没有对应会话文件时，用它清掉那批「状态未知」。
  */
+/**
+ * 删除若干「账号 + 会话」副本。
+ *
+ * ⚠️ 只删传入的这几份：组内其他账号的副本原样保留。正文**不物理删除** ——
+ * 移到 `<数据目录>/deleted-sessions/<region>/<cid>.jsonl`，需要时可手动找回。
+ */
+export function deleteSessionCopies(
+  items: DeleteSessionCopyItem[],
+  region?: Region,
+): Promise<DeleteSessionCopiesResponse> {
+  return call("delete_session_copies", { items, ...(region ? { region } : {}) });
+}
+
 export function clearSessionCache(region?: Region): Promise<SessionCacheClearResponse> {
   return call("clear_session_cache", region ? { region } : undefined);
 }
@@ -1669,10 +1686,21 @@ export function getCreditStatistics(refresh = false, region?: RegionFilter): Pro
   return call("get_credit_statistics", Object.keys(args).length > 0 ? args : undefined);
 }
 
-export function getTokenStatistics(days?: number, region?: RegionFilter): Promise<TokenStatistics> {
+/**
+ * Token 统计。
+ *
+ * `force = true` ⇒ 后端先清空扫描缓存再**全量重读**所有 jsonl（「刷新统计」走这条路）；
+ * 缺省 `false` ⇒ 按 `(mtime, size)` 增量，文件没变就复用。
+ */
+export function getTokenStatistics(
+  days?: number,
+  region?: RegionFilter,
+  force?: boolean,
+): Promise<TokenStatistics> {
   const args: Record<string, unknown> = {};
   if (days) args.days = days;
   if (region) args.region = region;
+  if (force) args.force = true;
   return call("get_token_statistics", Object.keys(args).length > 0 ? args : undefined);
 }
 

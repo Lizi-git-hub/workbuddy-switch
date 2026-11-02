@@ -1,10 +1,15 @@
 
 import { useState } from "react";
-import { Download, GitMerge, History, Loader2 } from "lucide-react";
+import { Download, GitMerge, History, Info, Loader2, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import * as api from "@/lib/api";
+import type { Region } from "@/lib/types";
 import {
   Sheet,
   SheetContent,
@@ -23,6 +28,17 @@ export interface SessionReplicaViewProps {
   onSyncGroup?: (group: SessionGroupView, title?: string) => void;
   busyGroupKeys?: ReadonlySet<string>;
   onUnifyGroup?: (group: SessionGroupView) => void;
+  /** 副本所在 region（删除时后端按 region 定位库与 jsonl）。 */
+  region?: Region;
+  /** 删除成功后让页面重新拉一次组（不做本地乐观更新：状态要由后端重算）。 */
+  onDeleted?: () => void;
+  /**
+   * 非空 ⇒ 客户端正在运行，删除 / 同步 / 统一标题一律禁用。
+   *
+   * 这些操作会改写 `projects/**` 与 `sessions` 行：客户端运行时会重建被删的会话、
+   * 用内存里的标题覆盖刚同步的结果 ⇒ 与其让用户点完看到"没生效"，不如先拦住。
+   */
+  blockedReason?: string | null;
 }
 
 /** 组状态 → 徽标变体（与 `sessions.replica.status.*` 文案配套，**内容级**派生）。 */
@@ -80,6 +96,9 @@ export function SessionReplicaView({
   onSyncGroup,
   busyGroupKeys,
   onUnifyGroup,
+  region,
+  onDeleted,
+  blockedReason,
 }: SessionReplicaViewProps) {
   const t = useT();
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -176,6 +195,9 @@ export function SessionReplicaView({
               onSyncGroup={onSyncGroup ? requestSync : undefined}
               busy={busyGroupKeys?.has(open.key) === true}
               onUnifyGroup={onUnifyGroup}
+              region={region}
+              onDeleted={onDeleted}
+              blockedReason={blockedReason ?? null}
             />
           ) : null}
         </SheetContent>
@@ -189,11 +211,64 @@ interface SessionGraphSheetProps {
   onSyncGroup?: (group: SessionGroupView, title?: string) => void;
   busy: boolean;
   onUnifyGroup?: (group: SessionGroupView) => void;
+  region?: Region;
+  onDeleted?: () => void;
+  blockedReason?: string | null;
 }
 
-function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGraphSheetProps) {
+function SessionGraphSheet({
+  group,
+  onSyncGroup,
+  busy,
+  onUnifyGroup,
+  region,
+  onDeleted,
+  blockedReason,
+}: SessionGraphSheetProps) {
+  const blocked = Boolean(blockedReason);
   const t = useT();
   const items = buildSyncItems(group);
+  /* 勾选的副本（`uid\u001f cid`）—— 删除是**按副本**的：只处理选中的账号，
+     组内其他副本一个都不动。 */
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const checkedRows = group.rows.filter((row) => checked.has(`${row.accountUid}\u001f${row.sessionId}`));
+  const allChecked = group.rows.length > 0 && checkedRows.length === group.rows.length;
+
+  function toggleRow(key: string, next: boolean) {
+    setChecked((prev) => {
+      const copy = new Set(prev);
+      if (next) copy.add(key);
+      else copy.delete(key);
+      return copy;
+    });
+  }
+
+  async function runDelete() {
+    if (checkedRows.length === 0) return;
+    setDeleting(true);
+    try {
+      const response = await api.deleteSessionCopies(
+        checkedRows.map((row) => ({ uid: row.accountUid, cid: row.sessionId })),
+        region,
+      );
+      if (response.deleted > 0) {
+        toast.success(t("sessions.delete.done", { n: response.deleted }));
+      }
+      if (response.deleted < checkedRows.length) {
+        const failed = response.results.filter((item) => !item.ok).length;
+        toast.warning(t("sessions.delete.partial", { n: failed }));
+      }
+      setChecked(new Set());
+      setDeleteOpen(false);
+      onDeleted?.();
+    } catch (e) {
+      toast.error(t("sessions.delete.fail", { error: api.asError(e) }));
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   return (
     <>
@@ -203,6 +278,13 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
       </SheetHeader>
 
       <div className="flex-1 overflow-y-auto p-5">
+        {/* 客户端运行中：写操作全部禁用，理由摆在最上面（不靠 hover 才发现）。 */}
+        {blocked ? (
+          <Alert variant="warning" className="mb-3" data-client-running>
+            <Info className="size-4" aria-hidden="true" />
+            <AlertDescription>{blockedReason}</AlertDescription>
+          </Alert>
+        ) : null}
         {/* ★ 关联图（`commonPrefix === null` ⇒ `unknown`，**无数据不渲染**）。 */}
         {group.commonPrefix !== null ? (
           <div>
@@ -273,11 +355,17 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
         ) : null}
 
         <div className="mt-3 divide-y rounded-xl border">
-          {group.rows.map((row) => (
-            <div
-              key={`${row.accountUid}\u001f${row.sessionId}`}
-              className="flex items-start gap-3 px-4 py-3"
-            >
+          {group.rows.map((row) => {
+            const rowKey = `${row.accountUid}\u001f${row.sessionId}`;
+            return (
+            <div key={rowKey} className="flex items-start gap-3 px-4 py-3">
+              <Checkbox
+                className="mt-1 shrink-0"
+                checked={checked.has(rowKey)}
+                onCheckedChange={(next) => toggleRow(rowKey, next === true)}
+                aria-label={t("sessions.delete.rowAria", { name: row.accountLabel })}
+                data-session-copy-check={rowKey}
+              />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm font-medium">{row.accountLabel}</span>
@@ -301,7 +389,8 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
                   : t("sessions.replica.updatedUnknown")}
               </span>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* ★★ D2：未分叉组的**常驻**说明 ——「同步是加法」。
@@ -324,6 +413,36 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
         ) : null}
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
+          {/* 全选/取消 —— 删除按副本粒度，勾选与「同步」是两套动作，互不影响。 */}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={group.rows.length === 0 || blocked}
+            data-session-copy-toggle-all
+            onClick={() =>
+              setChecked(
+                allChecked
+                  ? new Set()
+                  : new Set(group.rows.map((row) => `${row.accountUid}\u001f${row.sessionId}`)),
+              )
+            }
+          >
+            {allChecked ? t("sessions.delete.clearAll") : t("sessions.delete.selectAll")}
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            disabled={checkedRows.length === 0 || deleting || blocked}
+            data-session-copy-delete
+            onClick={() => setDeleteOpen(true)}
+          >
+            {deleting ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Trash2 className="size-3.5" aria-hidden="true" />
+            )}
+            {t("sessions.delete.action", { n: checkedRows.length })}
+          </Button>
           {/* ★ P8「安全同步」：**只在真有可同步内容时**才给出口（`behind` + 有增量）。
               文案如实写「加法」—— 用户对「同步」最大的恐惧是被覆盖（§3.15.4）。 */}
           {(() => {
@@ -335,7 +454,7 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
               <Button
                 size="sm"
                 variant="outline"
-                disabled={busy}
+                disabled={busy || blocked}
                 data-sync-group={group.key}
                 title={titleOnly ? t("sessions.sync.titleOnlyHint") : t("sessions.sync.hint")}
                 onClick={() => onSyncGroup(group)}
@@ -357,6 +476,7 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
             <Button
               size="sm"
               variant="outline"
+              disabled={blocked}
               data-unify-group={group.key}
               title={t("sessions.unify.hint")}
               onClick={() => onUnifyGroup(group)}
@@ -367,6 +487,41 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
           ) : null}
         </div>
       </div>
+
+      {/* 删除确认：说清「只删选中的副本」「正文进备份目录可找回」「其他账号不受影响」。 */}
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(next) => {
+          if (!deleting) setDeleteOpen(next);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("sessions.delete.title", { n: checkedRows.length })}</DialogTitle>
+            <DialogDescription>{t("sessions.delete.desc")}</DialogDescription>
+          </DialogHeader>
+          <ul className="max-h-40 overflow-y-auto rounded-lg border p-2 text-xs">
+            {checkedRows.map((row) => (
+              <li key={`${row.accountUid}\u001f${row.sessionId}`} className="truncate px-1 py-0.5">
+                {row.accountLabel} · <span className="font-mono">{row.sessionId.slice(0, 8)}</span>
+              </li>
+            ))}
+          </ul>
+          <DialogFooter>
+            <Button variant="outline" disabled={deleting} onClick={() => setDeleteOpen(false)}>
+              {t("sessions.delete.cancel")}
+            </Button>
+            <Button variant="destructive" disabled={deleting} onClick={() => void runDelete()}>
+              {deleting ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Trash2 className="size-3.5" aria-hidden="true" />
+              )}
+              {t("sessions.delete.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

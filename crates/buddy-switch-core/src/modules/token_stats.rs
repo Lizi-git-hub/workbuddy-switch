@@ -1940,6 +1940,30 @@ pub fn account_today_by_uid(filter: RegionFilter) -> Value {
 }
 
 pub fn get_statistics_for_filter(filter: RegionFilter, days: Option<i64>) -> Value {
+    get_statistics_for_filter_forced(filter, days, false)
+}
+
+/// 清空 Token 扫描缓存（进程内 + 落盘），下次统计**全量重读**所有 jsonl。
+///
+/// 正常路径不需要它：缓存键是 `(mtime, size)`，文件没变就复用，变了自动重读。
+/// 这个出口专给「刷新统计」用 —— 用户点刷新时要的是「重新算一遍」这个动作本身，
+/// 而不是「确认缓存还新鲜」。
+pub fn clear_scan_cache() {
+    scan_cache().lock().unwrap().clear();
+    let _ = std::fs::remove_file(scan_cache_path());
+    /* 清空后不需要再落盘：下一次真实扫描会把新结果写回去。 */
+    CACHE_DIRTY.store(false, Ordering::Release);
+}
+
+/// [`get_statistics_for_filter`] 的强制版：`force = true` 时先清缓存再全量重扫。
+pub fn get_statistics_for_filter_forced(
+    filter: RegionFilter,
+    days: Option<i64>,
+    force: bool,
+) -> Value {
+    if force {
+        clear_scan_cache();
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let generated_at = crate::modules::config::now_ms();
     let range_days = match days {
