@@ -1,5 +1,5 @@
 
-import { Coins, MessagesSquare, Route, Users } from "lucide-react";
+import { Coins, MessagesSquare, Users } from "lucide-react";
 
 import { StatTiles, type StatTile } from "@/components/usage/stat-tiles";
 import { compactTokens, exactTokens, formatCredits } from "@/components/usage/format";
@@ -18,7 +18,8 @@ interface Props {
 
 export function OverviewStats({ metrics, accountCount, attentionCount, accountsLoading }: Props) {
   const t = useT();
-  const { token, credits, gateway } = metrics;
+  /* 网关功能已移除（页面 / 设置 / 采集全删）⇒ 总览不再留一张永远「—」的网关卡。 */
+  const { token, credits } = metrics;
 
   /* 对比昨日：`(今日 - 昨日) / 昨日`；昨日为 0 时**不编百分比**。 */
   let delta: { value: string; tone: StatTile["tone"] } | null = null;
@@ -64,22 +65,8 @@ export function OverviewStats({ metrics, accountCount, attentionCount, accountsL
         ? t("wbOverview.stat.creditsRemaining", { n: formatCredits(credits.remaining) })
         : t("wbOverview.stat.unavailable"),
     },
-    {
-      icon: Route,
-      label: t("wbOverview.stat.gateway"),
-      value: gateway
-        ? gateway.truncated
-          ? `≥ ${exactTokens(gateway.today)}`
-          : exactTokens(gateway.today)
-        : "—",
-      hint: gateway
-        ? gateway.truncated
-          ? t("wbOverview.stat.gatewayTruncated")
-          : t("wbOverview.stat.gatewayHint")
-        : t("wbOverview.stat.unavailable"),
-    },
   ];
 
-  /* `separated`：概览按原型 `.grid.g4` 摆成**一排四张独立卡**（每块一张 `.stat`）。 */
+  /* `separated`：概览按原型 `.grid.g4` 摆成**一排独立卡**（每块一张 `.stat`）。 */
   return <StatTiles tiles={tiles} ariaLabel={t("wbOverview.stat.aria")} separated />;
 }

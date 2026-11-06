@@ -17,17 +17,49 @@
  * 键前缀：`shared.`
  */
 export const zh = {
+  /* 密钥表下方的说明段 —— **三个平台的密钥表共用同一段话**（差异只有「归属」那一列）。
+     ★ 抽取理由：改造前这段文案在 WB / Trae / Qoder 三个组件里各写一遍，措辞已经漂移过。 */
   "shared.gateway.keys.note":
-    "密钥明文只在创建时展示一次；此处永远只显示掩码。请求数为该密钥创建以来的累计值，与概览的「今日」口径不同。吊销可逆：已吊销的密钥仍留在表里，可「恢复」回启用态（库中存的是同一把 Key，明文未变，客户端无需改配置），也可「删除」清掉记录。",
+    "密钥默认以掩码展示（前缀 + 尾部 4 位），点右侧眼睛可查看完整密钥。创建时选「自行保存」的密钥不会存进本软件 —— 与改造前的旧密钥一样，只显示掩码、不提供眼睛（明文当时只在你眼前出现过一次）；要能随时查看，创建时选「保存到本软件」。请求数为该密钥创建以来的累计值，与概览的「今日」口径不同。吊销可逆：已吊销的密钥仍留在表里，可「恢复」回启用态（库中存的是同一把 Key，明文未变，客户端无需改配置），也可「删除」清掉记录。",
+  /* 密钥眼睛（`key-secret-cell.tsx`，四条产品线共用）。
+     ★ 2026-11-04：明文**不随创建落盘**，用户在创建后的面板里二选一：
+       「保存到本软件」→ 落盘、列表出眼睛；「自行保存」→ 只有 hash，永久只看得到掩码。 */
+  "shared.gateway.keys.createdTitle": "API Key 已创建",
+  "shared.gateway.keys.createdDesc": "完整 Key，你可以选择存储到本软件或自行保存。",
+  "shared.gateway.keys.saveToApp": "保存到本软件",
+  "shared.gateway.keys.saveSelf": "自行保存",
+  "shared.gateway.keys.savedToApp": "已保存到本软件",
+  "shared.gateway.keys.saveFailed": "保存失败",
+  "shared.gateway.keys.reveal": "显示完整密钥",
+  "shared.gateway.keys.hide": "隐藏完整密钥",
+  "shared.gateway.keys.copy": "复制密钥",
+  /* 创建弹窗第二行以外的**第三个输入**：自定义密钥（留空即自动生成）。 */
+  "shared.gateway.keys.customLabel": "自定义密钥（可选）",
+  "shared.gateway.keys.customPlaceholder": "留空则自动生成，或粘贴你已有的密钥",
+  "shared.gateway.keys.customHint":
+    "留空：按本产品线的规则自动生成（带该线自己的前缀）。填写：原样使用你输入的密钥，仅去掉首尾空格、不补前缀、不改大小写 —— 适合沿用你已有的密钥。不能与本产品线已创建过的密钥重复（重复会被拒绝创建）。",
   // ---- 版本区域（region.ts / trae-types.ts / trae-variant-status.ts） ----
+  /* 请求日志的「积分」列 —— 只有 `trae-request-log.tsx`（Trae / Qoder **共用**）
+     需要它：Qoder 传 `credit` 取值函数（上游逐请求回报 `usage.credits`），Trae 不传
+     （它的上游 `token_usage` 事件不回报积分，实测抓包确认）。WB 侧另有自己的
+     `wbStats.gateway.log.col.credit*`（与其它列同一命名空间）。
+     ⚠️ 两条 `creditHint` 是同一句提示的两份副本（只差 `usage.credits` / `usage.credit`），
+        刻意分属两个域以贴合各自列集；改口径时**必须同步改两处**。 */
+  "shared.gateway.log.col.credit": "积分",
+  "shared.gateway.log.col.creditHint":
+    "本次请求消耗的积分（上游 usage.credits）；0 表示上游未上报，不等于免费。逐条相加是请求口径，与「积分」页的余额口径可能不同（重试 / 多设备会重复计入）",
   "shared.region.version.cn": "国内版",
   "shared.region.version.global": "国际版",
   "shared.region.gateway.cn": "国内版 (WorkBuddy)",
   "shared.region.gateway.global": "国际版 (WorkBuddy AI)",
   "shared.region.filter.all": "合并",
 
+  // ---- 统计范围切换条（region-bar.tsx） ----
+  /* P3：`shared.region.scope.aria` 已删除（区域选择器上移到侧栏）。
+     页面内只剩「合并」这个**视图参数**开关。 */
   "shared.region.combine.aria": "合并国内版与国际版查看",
   "shared.region.combine.label": "合并国内版与国际版",
+  /* P3：合并态由「开关」改为 `.seg` 双按钮（原型 `viewUsage` 的 params 段）。 */
   "shared.region.combine.only": "仅本作用域",
   "shared.region.combine.all": "合并全部作用域",
 
@@ -42,14 +74,26 @@ export const zh = {
 
   // ---- 网关账号池卡（components/gateway/account-pool-card.tsx，两侧共用）----
   "shared.gateway.pool.title": "账号池",
+  /* P3：接入片段的**字段标签**统一在这里（原来 WB 与 Trae 各有一套）。
+     ⚠️ 只有**自然语言标签**放这儿；片段里的键名（`apiProvider` 等）是外部工具读取的
+     契约，保持英文硬编码，翻译了会粘贴失败。 */
+  /* P11：`snippet.apiBase` / `snippet.apiKey` 两条已删除 —— 用它们的 `cherry` 片段随
+     工具清单调整而移除（新工具集见下方 `shared.gateway.access.*`）。`Base URL` / `API Key`
+     是通用参数名（英文契约），直接硬编码在片段里，不入词表。 */
   "shared.gateway.snippet.model": "模型",
   /* 模型清单还没加载时用占位 —— **不编造**一个看起来可用的模型名。 */
   "shared.gateway.snippet.modelPlaceholder": "请在模型列表中选择",
 
+  // =====================================================================
+  // ---- 接入说明（P11 §1.7）—— 协议 × 工具，两平台共用 ----
+  // =====================================================================
+  // ⚠️ 片段里的**键名**（`ANTHROPIC_BASE_URL` / `base_url` / `env_key` …）是外部工具读取的
+  //    契约，保持英文硬编码；这里只放**自然语言标签**与**协议元数据的展示名**。
   "shared.gateway.access.protocol.openai": "OpenAI 兼容",
   "shared.gateway.access.protocol.anthropic": "Anthropic 兼容",
   "shared.gateway.access.tool.genericOpenai": "其它 OpenAI 兼容工具",
   "shared.gateway.access.tool.genericAnthropic": "其它 Anthropic 兼容工具",
+  // 端点说明：两种协议**都已支持**（§3.18.2）；`{openai}` / `{anthropic}` 是**英文端点契约**。
   "shared.gateway.access.endpointNote":
     "协议端点：{openai}（OpenAI）· {anthropic}（Anthropic）—— 两者都已支持，含流式。",
   "shared.gateway.access.authHeaderLabel": "认证头",
@@ -69,6 +113,7 @@ export const zh = {
   "shared.gateway.sourceBar.sourceLabel": "来源",
   "shared.gateway.sourceBar.identifiedAt": "上次识别 {time}",
   "shared.gateway.sourceBar.neverIdentified": "尚未识别过",
+  /* ⚠️ 计数只说「已识别」，**禁止**「N 个模型可用」—— HTTP 200 ≠ 模型可用（§3.17.3 陷阱 3 / D24）。 */
   "shared.gateway.sourceBar.count": "已识别 {n} 个模型",
   "shared.gateway.sourceBar.autoHint": "接入后自动识别，无需手填模型名",
   "shared.gateway.sourceBar.justNow": "刚刚",
@@ -76,6 +121,10 @@ export const zh = {
   "shared.gateway.sourceBar.hoursAgo": "{n} 小时前",
   "shared.gateway.sourceBar.yesterday": "昨天",
   "shared.gateway.sourceBar.daysAgo": "{n} 天前",
+  /* 模型表格（P11 §1.6）—— components/gateway/model-table.tsx，**两平台共用**。
+     列集 = 模型 / 上游状态 / 网关暴露；**无归属列**（决策 #1）、**无协议列**（决策 #2）。
+     ⚠️ 「上游状态」列只可能在 Trae 侧出现（WB 的 `available` 恒 true ⇒ 不渲染该列，决策 #3），
+        但文案仍放共享域：它是**共用壳**的一部分，由调用方按 `showUpstream` 决定是否渲染。 */
   "shared.gateway.models.colModel": "模型",
   "shared.gateway.models.colContext": "上下文",
   "shared.gateway.models.contextTitle": "上下文上限",
@@ -83,6 +132,10 @@ export const zh = {
   "shared.gateway.models.contextFromCatalog": "按目录声明",
   "shared.gateway.models.colUpstream": "上游状态",
   "shared.gateway.models.colExposed": "网关暴露",
+  /* ★ issue #65：模型池里每个模型的「思考档位 / 积分倍率」两列。
+     - 档位空数组有**两种成因**（明确不支持 / 该程序位没下发），文案必须分开，
+       否则 TraeWork 侧整列「—」会被读成「这些模型都不能调档」。
+     - 倍率是**倍数**不是金额（`×0.2` = 基准价的 0.2 倍），说成「价格」会误导。 */
   "shared.gateway.models.colEfforts": "思考档位",
   "shared.gateway.models.colCredits": "积分倍率",
   "shared.gateway.models.effortDefault": "默认档：{effort}",
@@ -94,11 +147,16 @@ export const zh = {
   "shared.gateway.models.creditsFree": "免费",
   "shared.gateway.models.creditsNone": "上游未提供积分倍率",
   "shared.gateway.models.creditsHint": "倍率：按基准价的多少倍计费，不是金额",
+  /* ★ issue #101：图片输入能力（三态）。
+     「未声明」≠「不支持」—— 上游清单（Trae / Qoder 根本没有这个字段）没说时，
+     客户端按自己的配置处理，网关**不替它断言**。三态文案必须分开，否则用户会以为
+     网关在说「这个模型不能读图」。 */
   "shared.gateway.models.colImages": "图片输入",
   "shared.gateway.models.imageYes": "支持",
   "shared.gateway.models.imageNo": "不支持",
   "shared.gateway.models.imageUndeclared": "未声明",
   "shared.gateway.models.imageSourceUpstream": "上游目录声明支持图片输入",
+  "shared.gateway.models.imageSourceKnown": "网关内置表声明（上游没有能力字段，可手动改）",
   "shared.gateway.models.imageSourceOverride": "你在本页手动指定（覆盖上游声明）",
   "shared.gateway.models.imageUndeclaredHint":
     "上游清单没有声明这个模型能否读图。客户端连上来时默认按「不支持」处理（图片会被它自己挡掉，请求根本不到网关），需要时可在此手动标记。",
@@ -121,11 +179,17 @@ export const zh = {
   "shared.gateway.models.idCopied": "模型 ID 已复制",
   /* 计数 = `available && !disabled`，与出口 ①（`/v1/models` 过滤）**同源**。 */
   "shared.gateway.models.count": "当前暴露 {served} / {total} 个",
+  /* ★ 两个出口同时生效 —— 禁用**必须**两个出口都改，否则是假开关（§3.18.1）：
+     只说「已从清单移除」会让用户以为调用还能过；必须把「直接调用也会被拒」一并说清。 */
   "shared.gateway.models.twoExits":
     "禁用的模型不会出现在 `/v1/models`，直接调用也会被拒绝并说明原因 —— 两个出口同时生效，否则禁用就是假开关。",
   "shared.gateway.models.disabledToast": "已禁用「{name}」",
   "shared.gateway.models.enabledToast": "已启用「{name}」",
   "shared.gateway.models.toggleFail": "操作失败",
+  // ---- 限流探测（components/gateway/model-probe-card.tsx + model-list.tsx 新增列）----
+  // 语义红线：只有「模型限流／账号限流／模型封禁」算限流；积分不足 / 登录失效**分列**。
+  // ★ 安全审计 S1：notice 恒定可见（探测是真实上游请求，不是本地操作）。
+  // ★ 安全审计 S2：reason（上游原文）只许纯文本渲染。
   "shared.gateway.models.colProbe": "限流（探测）",
   // ── 模型降级链（P13）──
   // 文案纪律：只说「明确失败」「不回退」「不把失败改写成成功」，
@@ -236,6 +300,8 @@ export const zh = {
   "shared.gateway.probe.adoptDesc":
     "可用 ⇒ 清掉该模型的冷却；限流／封禁 ⇒ 置该模型的冷却。只动冷却，不推进退避计数。",
   "shared.gateway.probe.adoptAria": "回填账号池",
+  // ★ Trae（T1）：Trae 池**没有「模型级冷却」** ⇒ 回填只能写账号级冷却、会误伤同账号其它模型
+  //   （方案 §4.5.4 的 T3，明确不建议）。故开关**禁用**并给出这条原因文案。
   "shared.gateway.probe.adoptUnsupportedTitle": "本平台不支持回填",
   "shared.gateway.probe.adoptUnsupportedDesc":
     "Trae 账号池没有「模型级冷却」：回填只能写账号级冷却，会把该账号的其它模型一起冷却。本页只呈现探测结果，不改动账号池。",
@@ -253,13 +319,16 @@ export const zh = {
   "shared.gateway.probe.done": "已完成",
   "shared.gateway.probe.cancelled": "已取消剩余（下面是部分结果）",
   "shared.gateway.probe.adoptResult": "回填 置 {added} / 清 {cleared}",
+  // issue #88：探出限流却「回填 0 条」是最需要解释的组合，旧实现一个字都不渲染。
   "shared.gateway.probe.adoptNone":
     "本次判出 {n} 格限流，但没有写入任何冷却：这些账号可能已不在池中、已被禁用，或已有更晚的冷却（不会被缩短）。",
+  // 回填明细（§5.3「回填反馈」完成条 → 可展开）；账号 / 模型 / 置或清 / 到什么时候。
   "shared.gateway.probe.adoptedDetail": "已回填 {n} 条冷却 · 看明细",
   "shared.gateway.probe.adoptedAdded": "置冷却",
   "shared.gateway.probe.adoptedCleared": "已清除",
   "shared.gateway.probe.adoptedUntil": "至 {time}",
   "shared.gateway.probe.legendUnknown": "未探测",
+  // 被动已知按**来源**分两条（§5.3 角标「真实流量」/「客户端日志」—— 二者必须能区分）。
   "shared.gateway.probe.legendPassiveFlow": "被动已知 · 真实流量",
   "shared.gateway.probe.legendPassiveLedger": "被动已知 · 客户端日志",
   "shared.gateway.probe.matrixEmpty": "没有可探测的组合：请至少各选一个账号与模型。",
@@ -327,20 +396,24 @@ export const zh = {
   "shared.gateway.probe.colTooltipUnavailable": "本次实测：{total} 个账号中 {unavailable} 个当前不可用（上游排队／上游异常等，非限流）—— 点击看矩阵",
   "shared.gateway.probe.colTooltipPassive": "被动已知：{flow} 个来自真实流量、{ledger} 个来自客户端日志（共 {n} 个账号）—— 尚未主动探测，点击去探测",
   "shared.gateway.probe.colTooltipNone": "尚未探测这个模型 —— 在上方「限流探测」卡里选它",
+  // 排序（§5.3：可点表头排序，默认按「限流数」降序；用 Radix Select 不用 details/summary）。
   "shared.gateway.probe.sortLabel": "排序",
   "shared.gateway.probe.sortAria": "矩阵排序方式",
   "shared.gateway.probe.sortThrottle": "按限流账号数",
   "shared.gateway.probe.sortName": "按模型名",
+  // 详情气泡（§5.3：点单元格 → 状态 / HTTP / 上游原文 / resetAt / 耗时 + 「所以我能怎么办」）。
   "shared.gateway.probe.detailSource": "来源",
   "shared.gateway.probe.detailHttp": "HTTP",
   "shared.gateway.probe.detailLatency": "耗时",
   "shared.gateway.probe.detailReset": "重置时刻",
   "shared.gateway.probe.detailReason": "上游原文",
+  // 空态（§5.3：全 ok ⇒「全部可用」；全 skipped ⇒ 去登录 / 导入账号指引）。
   "shared.gateway.probe.emptyAllOk": "全部可用：本次实测的所有格都通过了（上游 200），当前没有限流。",
   "shared.gateway.probe.emptyAllSkippedTitle": "全部跳过：没有任何账号发出请求",
   "shared.gateway.probe.emptyAllSkippedDesc":
     "这些账号都没有可用凭据——可能没登录、凭据是加密信封、或已被移出账号库。请到「账号」页重新登录或导入账号；若本机没有对应桌面客户端（Docker / headless），请在「网关 → 账号池」用扫码方式添加；若用的是「指定账号」策略，请确认该账号仍在本机账号库中。",
   "shared.gateway.pool.totalRequests": "累计请求 {count}",
+  // ★ issue #129：账号池顶部「账号故障时自动切换」开关。
   "shared.gateway.pool.autoFailover": "账号故障时自动切换",
   "shared.gateway.pool.autoFailoverHint":
     "开启后，一个账号在回复中途挂掉时，网关会把这次失败变成「可重试错误」，客户端自动换号重跑整个步骤，你看到的是从头完整重写的回复。代价：这一次回答的已输出部分作废、会再消耗一次额度。关闭时保持原有行为（上游报错按原样透出）。默认关闭：它改变对外报错方式，属于行为变更。",
@@ -357,10 +430,16 @@ export const zh = {
   "shared.gateway.pool.tile.excluded": "已排除",
   // Qoder 独有的一格：上游 429 按**模型**报 ⇒ 账号本身可用、但有模型级冷却。
   "shared.gateway.pool.tile.modelCooling": "模型冷却",
+  // 模型冷却徽标（issue #88）：**必须带解冻时刻**，否则「N 个模型限流」等于没说。
+  //
+  // ★ 2026-10-29：冷却已经按上游声明的时刻走（`Pool::adopt_probe_result`），所以默认就是
+  //   「{time} 解冻」。只有**上游什么都没说**、走本仓兜底时才是「约 … 解冻」——
+  //   那个时刻是猜的，加「约」是为了不让人拿它当承诺。
   "shared.gateway.pool.modelCoolingBadge": "{count} 个模型限流 · {time} 解冻",
   "shared.gateway.pool.modelCoolingBadgeApprox": "{count} 个模型限流 · 约 {time} 解冻",
   "shared.gateway.pool.modelCoolingHint":
     "{models} 处于模型级冷却（只影响这些模型，其它模型仍可用），最早 {time} 解冻。",
+  // 徽标 tooltip 的逐模型行（issue #88 缺口 4.2）：名称 · 剩余 · 是否兜底 · 上游声明时刻。
   "shared.gateway.pool.modelCoolingRow": "{model} · 剩 {remaining}{fallback}{upstream}",
   // 上游**文案**里声明的恢复时刻（只在与实际冷却截止不同时出现 —— 例如被 24h 截断）。
   "shared.gateway.pool.modelCoolingRowUpstream": " · 上游称 {time} 重置",
@@ -375,6 +454,7 @@ export const zh = {
   // 仅 WorkBuddy：三档策略里「非指定账号」的第二档（写回 `AccountStrategy::MaxCredits`）。
   "shared.gateway.pool.strategyMaxCredits": "按实时积分择优（每次请求查询）",
   "shared.gateway.pool.strategyRandom": "随机（在合格账号里均匀抽签）",
+  // issue #102：粘住当前账号、限流才换 —— 目的是复用上游前缀缓存，降低 token 消耗。
   "shared.gateway.pool.strategySequential": "顺序（固定一个号，限流才换）",
   "shared.gateway.pool.preferredMissing": "已指定的账号（当前不在池中）",
   // 偏好语义：指定账号不可用时**回落**自动择优，而不是拒绝服务。
@@ -409,6 +489,16 @@ export const zh = {
   "shared.clipboard.copied": "已复制",
   "shared.clipboard.failed": "复制失败，请手动选择后复制",
 
+  // =====================================================================
+  // ---- 桌面悬浮窗（components/companion/，独立窗口）----
+  // ⚠️ 这里**不要**写 `companion/*` 这种通配：`check-scope-registry.cjs` 的 `stripComments`
+  //   是**朴素正则**（`/\/\*[\s\S]*?\*\//`），行注释里的 `/*` 会被当成块注释起点，
+  //   一直吞到文件里**下一个 `*/`** —— 实测因此丢掉过 250 行词条（门禁报「词条缺 …」）。
+  //   词条文件里任何注释都别出现裸 `/*`。
+  // =====================================================================
+  // 悬浮窗是**独立 webview**（`?window=companion`，见 `main.tsx` 的入口分流），
+  // 与主窗口共用同一份词表。四态文案 / 只读脚注 / 空态 / 无障碍标签由 T03 补；
+  // T01 只放骨架**实际引用**的标题键（本仓没有「未使用键」检查，多余键会静默腐坏）。
   "shared.companion.title": "会话状态",
   // 侧栏左下角入口（`App.tsx` 的 `CompanionToggle`）：tooltip + 无障碍标签。
   // 它与托盘菜单项是**同一开关的两面**（都经 `companion_set_visible` 收敛），故与托盘同名。
@@ -424,6 +514,8 @@ export const zh = {
   "shared.companion.state.waiting": "待确认",
   "shared.companion.state.done": "已完成",
   "shared.companion.state.failed": "失败",
+  // 来源 id → 展示名（id 是**后端数据**，见 companion-row 的 SOURCE_LABEL_KEY）。
+  // ★ 必须覆盖 `agent_watch::HOOK_SOURCES` 的每一项，门禁 `check-agent-sources.cjs` 会校验。
   "shared.companion.source.workbuddyCn": "WorkBuddy 国内版",
   "shared.companion.source.workbuddyGlobal": "WorkBuddy 国际版",
   "shared.companion.source.claude": "Claude Code",
@@ -437,6 +529,8 @@ export const zh = {
   "shared.companion.source.thisTool": "本工具",
   // 会话没有标题时的兜底（客户端只在部分事件里带标题，空标题是常态）。
   "shared.companion.untitled": "未命名会话",
+  // ★ 无障碍描述：**脱敏**——只报来源 / 状态 / 时间，**不含标题**
+  //（标题是敏感字段，默认不进 DOM；不能因为读屏就把明文塞回去，见 P9 ✅ #3）。
   "shared.companion.row.aria": "{source} · {state} · {hint}",
   // 悬停信息卡的两个字段标签（标题本身即信息卡主体，不设标签）。
   "shared.companion.info.source": "来源",
@@ -471,6 +565,15 @@ export const zh = {
   "shared.api.webuiPermissionByProcess": "webui 模式由服务进程（终端启动）的权限决定，无需额外授权",
   "shared.api.accountNotFound": "未找到账号",
 
+  // =====================================================================
+  // ---- 演示夹具（screenshot-demo.ts：演示站 / 截图站的假数据） ----
+  // =====================================================================
+  // ⚠️ 这些文案**只在演示模式下出现**，但演示站本身就是给人看的一站，
+  // 因此同样要中英两版。模型名、协议键、路径、uid 刻意不入表（它们是契约）。
+  // ---- 假账号 ----
+  // ★ 2026-10-12：演示账号名与原型 `SCOPES["wb-cn"].accounts`（`buddy-switch-prototype.html:1229`）
+  //   **逐一对应** ⇒ 演示站的账号页可以与原型逐卡对照（1:1 核验）。
+  //   ⚠️ 这些是**用户名（数据）**，中英两语言下写法相同 —— **不翻译**。
   "shared.demo.account.a": "jackey",
   "shared.demo.account.aRemark": "主号 · 长期",
   "shared.demo.account.b": "team-shared",
@@ -510,6 +613,8 @@ export const zh = {
   "shared.demo.pool.diagnose": "{name}（{tail}：{reason}，积分={credits}）",
   "shared.demo.pool.creditsUnknown": "未知",
 
+  // ★ 2026-10-12：Trae 演示账号名与原型 `SCOPES["trae-cn"].accounts`（`buddy-switch-prototype.html:1292`）
+  //   **逐账号对应** ⇒ 演示站可与原型逐卡对照。⚠️ 用户名是**数据**，中英两语言写法相同 —— 不翻译。
   "shared.demo.trae.name.jackey": "jackey",
   "shared.demo.trae.remark.jackey": "TraeWork 主号",
   "shared.demo.trae.name.codeLab": "code-lab",
@@ -532,8 +637,12 @@ export const zh = {
   "shared.demo.trae.checkin.already": "今日已签到",
   "shared.demo.trae.checkin.sessionDead": "会话已失效，需重新登录",
   "shared.demo.trae.warn.altBSessionDead": "小号 B 会话已失效，请重新登录后再签到",
+  // ---- Trae：程序位展示名（`label` / `nameAlias`） ----
+  // 合并后的客户端（issue #20）：客户端自己就叫 `Trae`。
   "shared.demo.trae.program.trae": "Trae CN",
   "shared.demo.trae.program.traeGlobalLabel": "Trae",
+  // 「待实测」是**状态标注**，不是品牌名 —— 它是这条目唯一需要翻译的部分。
+  // ---- Trae：API Key 名 / 网关诊断 / 日志 ----
   "shared.demo.trae.key.cursorCn": "Cursor (TraeWork)",
   "shared.demo.trae.key.cherryGlobal": "Cherry (TraeWork AI)",
   "shared.demo.trae.key.continueCode": "Continue (TraeCode)",
@@ -640,7 +749,16 @@ export const zh = {
   "shared.refreshPart.checkin": "签到状态已刷新",
   "shared.refreshPart.credential": "凭据状态已刷新",
   "shared.refreshPart.fail": "刷新失败",
-  "shared.credit.autoEvery": "每 {n} 分钟自动刷新",
+  // 积分的自动刷新节拍与「上次刷新」（三平台积分视图共用，issue #133）。
+  // ★ 两句文案对应**两种成本**（issue #133 复核 §3）：`autoEvery` 是「打上游」的视图，
+  //   `autoFollow` 是「只读本地快照」的视图。有抖动之后「每 N 分钟」不再成立 ⇒ 用「约」。
+  "shared.credit.autoEvery": "约每 {n} 分钟向官方查询一次",
+  "shared.credit.autoFollow": "自动跟随后台同步",
+  "shared.credit.autoOff": "自动刷新已关闭（设置 · 通用可开启）",
+  /* 资源包明细里那一句「已用 X」。**四个装配点共用这一条**（issue #144 复核 §3.4）：
+     它不属于任何平台的词条域，而此前渠道页写「已用 13.99」、聚合页与 Qoder 写裸数字
+     —— 同一个抽屉里同一列有两种说法，用户无从判断那个数字是什么。 */
+  "shared.credit.packUsed": "已用 {n}",
   "shared.credit.lastRefresh": "上次刷新 {time}",
   // 详情抽屉顶部的四个指标块（文本在页面侧格式化，这里只提供标签与固定短语）。
   "shared.stat.credits": "积分",
@@ -649,6 +767,9 @@ export const zh = {
   "shared.stat.credential": "凭据",
   "shared.stat.checkedIn": "已签到",
   "shared.stat.notCheckedIn": "未签到",
+  // issue #47：Trae / Qoder 的签到与 Token 两个块多出来的**诚实**措辞。
+  // 「读不到」「未开放」「按本地台账」三档必须分开 —— 合成一句就是把「不知道」
+  // 说成「没有」，用户会反复去点一个注定无效的按钮。
   "shared.stat.checkinUnreadable": "读不到",
   "shared.stat.checkinUnavailable": "本区域未开放",
   "shared.stat.checkinFromLedger": "按本地台账（刷新签到状态可向上游确认）",
@@ -700,6 +821,8 @@ export const zh = {
   "shared.drawer.group.picker.exists": "该分组已存在，将直接归入",
   // 积分 / 资源包区块：文本已由调用方格式化，抽屉只负责排版。
   "shared.drawer.packs.title": "积分 / 资源包",
+  // 只读程序位徽标（**不是**切换控件）—— 抽屉里不允许出现第二个「看起来能切」的控件。
+  // ★ B5：签到积分（字段来自**上游实测响应**；`+N` 的 N 取 `today_credit` / `daily_credit`）。
   "shared.drawer.checkin.title": "签到",
   "shared.drawer.checkin.today": "今日签到",
   "shared.drawer.checkin.streak": "已连签 {n} 天",
@@ -737,6 +860,10 @@ export const zh = {
   "shared.drawer.empty.title": "暂无详情",
   "shared.drawer.empty.description": "该账号暂时没有可展示的详情；可重新检测后再试。",
 
+  // =====================================================================
+  // ---- 最小批量操作条（components/account-batch-bar.tsx，两平台共用）----
+  // =====================================================================
+  // §3.3 的「勾选 + 批量」本期只做**最小形态**：计数 + 三个动作 + 清除。
   "shared.batch.selected": "已选 {n} 项",
   "shared.batch.checkin": "批量签到",
   "shared.batch.refresh": "刷新",
@@ -748,6 +875,8 @@ export const zh = {
   "shared.batch.deleteDesc": "确定删除选中的 {n} 个账号？删除后可在回收站恢复。",
   "shared.batch.confirm": "删除",
   "shared.batch.cancel": "取消",
+  // ★ 批量签到结果条（原型 `checkinResultHtml`，`buddy-switch-prototype.html:2339-2354`）。
+  // ⚠️ 必须**同时**给出「成功 N · 失败 M」，只报成功就是撒谎（批量操作必然部分失败）。
   "shared.checkinResult.summary": "成功 {ok} · 失败 {fail}",
   "shared.checkinResult.failedNames": "失败账号：{names}",
   "shared.checkinResult.allOk": "全部账号已签到",
@@ -779,9 +908,13 @@ export const zh = {
   "shared.toolbar.viewTableDisabled": "窗口太窄，表格视图不可用；请加宽窗口后重试",
   "shared.toolbar.selectAll": "全选",
   "shared.toolbar.deselectAll": "取消全选",
-  "shared.batch.refreshAll": "刷新全部账号",
-  "shared.batch.refreshAllHint": "积分、签到状态与今日 Token 一起重取，无需先选中",
 
+  // =====================================================================
+  // ---- 「添加账号」抽屉（components/add-account-drawer.tsx，两平台共用）----
+  // =====================================================================
+  // ★ 抽屉是**共享组件**（WorkBuddy 与 Trae 是同一个），且同时承载原工具栏「⋯」菜单的内容 ⇒
+  //   文案放这里，而不是 `wbAccounts.*` / `trae.page.*` 各写一份 —— 两平台的「添加账号」
+  //   必须逐字一致（用户要求「交互保持一致」）。
   "shared.addDrawer.title": "添加账号",
   "shared.addDrawer.scopePrefix": "当前作用域：",
   "shared.addDrawer.scopeSuffix": "。选择一种方式添加账号。",
@@ -795,6 +928,10 @@ export const zh = {
   // 「更多操作」= 原工具栏「⋯」菜单的分区标题。
   "shared.addDrawer.moreTools": "更多操作",
 
+  // =====================================================================
+  // ---- 账号列表空态（两种，绝不混用 —— §3.4 规则 3）----
+  // =====================================================================
+  // 混用会让用户以为**数据丢了**：明明是「被筛没了」，却显示「还没有账号」。
   "shared.list.empty.none": "还没有账号",
   "shared.list.empty.noneDesc": "添加或从本机导入账号后，即可在这里管理。",
   "shared.list.empty.filtered": "没有符合条件的账号",
@@ -829,6 +966,11 @@ export const zh = {
   "shared.authPanel.noCallback": "不需要本机回调：服务端轮询官方接口取结果，服务器 / 容器里也能完成登录。",
   "shared.authPanel.qrAlt": "授权二维码",
 
+  // =====================================================================
+  // ---- 无客户端形态（服务器 / 容器部署，issue #62）----
+  // =====================================================================
+  // 缺客户端不是故障，是**部署形态**：账号与网关只依赖凭据本身。
+  // 旧文案把它渲染成红字 + 只留「重新检测 / 从本机导入」，等于告诉服务器用户「你用不了」。
   "shared.srv.badge": "无客户端",
   "shared.srv.help": "降级说明",
   "shared.srv.strip.accounts": "未检测到 {scope} 客户端 —— 账号与网关不受影响：缺的只是程序位切换、客户端用量扫描与会话浏览。",
@@ -869,4 +1011,6 @@ export const zh = {
   "shared.srv.localUnavailableDesc": "改用「浏览器授权登录」或「粘贴授权凭据」；也可以在装了客户端的机器上导出备份再导入",
   "shared.srv.oauthTitle": "浏览器授权登录",
   "shared.srv.oauthDesc": "生成链接与二维码，用任意设备浏览器授权，服务端自己收结果",
+  "shared.batch.refreshAll": "刷新全部账号",
+  "shared.batch.refreshAllHint": "积分、签到状态与今日 Token 一起重取，无需先选中",
 } as const;

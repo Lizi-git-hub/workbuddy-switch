@@ -1245,6 +1245,8 @@ pub async fn switch_account(
     region: Option<String>,
     restart: Option<bool>,
     copy_session_ids: Option<Vec<String>>,
+    // 「落后的会话」：`[{sourceCid, targetCid}]`，切号时**同步**（追加新增行）而不是再复制一份。
+    sync_session_items: Option<Vec<Value>>,
     source_region: Option<String>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
@@ -1258,6 +1260,7 @@ pub async fn switch_account(
     };
     let restart = restart.unwrap_or(true);
     let copy_ids = copy_session_ids.unwrap_or_default();
+    let sync_items = sync_session_items.unwrap_or_default();
 
     // 与 webui 的 `/api/switch/progress` 同契约：同步写入进程内进度缓存，
     // 供 `switch_progress` 轮询；事件 `switch-progress` 仍照常派发。
@@ -1283,6 +1286,7 @@ pub async fn switch_account(
             &account_id,
             restart,
             &copy_ids,
+            &sync_items,
         )
     })
     .await;

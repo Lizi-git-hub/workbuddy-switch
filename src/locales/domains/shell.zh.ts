@@ -8,6 +8,9 @@ export const zh = {
   "app.name": "Buddy Switch",
   "app.demoBadge": "演示模式",
   "product.workbuddy": "WorkBuddy",
+  /* ★ issue #44：`TraeWork` 是**已被官方合并掉**的老程序线名（客户端自 2026-10-13 起只剩
+     每区一个 `Trae`）。侧栏原来仍写 `TraeWork` ⇒ 用户看到的名字与实际在用的客户端对不上。
+     徽标 / 文案一律用合并后的 `Trae`；老程序线的名字只在程序位按钮与迁移说明里出现。 */
   "product.trae": "Trae",
   /* Qoder 是商标，两种语言下写法相同，但仍走词表（与上面两条同款）。 */
   "product.qoder": "Qoder",
@@ -61,6 +64,8 @@ export const zh = {
   "topbar.theme": "切换主题",
   "topbar.appMenu": "应用设置",
 
+  // ---- 页头作用域副标题（redesign §3.2：页头统一「作用域 · 说明」+ 右侧 scope-chip）----
+  // ⚠️ 只读展示：切作用域的唯一入口在顶栏，页内不放区域切换器（区域已并入 L1 作用域）。
   "pageHead.overview.signedIn": "{scope} · 当前登录 {name}",
   "pageHead.overview.signedOut": "{scope} · 未登录",
   "pageHead.accounts": "{scope} · {n} 个账号",
@@ -79,6 +84,7 @@ export const zh = {
   "capability.autoRotate": "自动轮换",
   "capability.sessionCopy": "会话复制",
 
+  // ---- 命令面板（⌘K，P6 §3.7）----
   "palette.entry": "搜索或跳转",
   "palette.title": "搜索或跳转",
   "palette.description": "跨作用域搜索账号、页面与动作，回车直达。",
@@ -99,17 +105,23 @@ export const zh = {
   "palette.action.addAccount": "新增账号",
   "palette.action.openDataDir": "打开数据目录",
 
+  // ---- 键盘快捷键设置（P6 §3.1）----
   "shortcuts.settings.title": "键盘快捷键",
   "shortcuts.settings.label": "启用作用域快捷键",
   "shortcuts.settings.description": "用 {mod} + 1…{n} 直接切换到对应作用域。",
   "shortcuts.settings.degraded": "当前作用域超过 {limit} 个，已停用数字快捷键。",
 
+  // ---- 首次引导（P6 §1.5）----
   "firstRun.title": "快速上手",
   "firstRun.openPalette": "按 {shortcut} 打开命令面板，跨作用域搜索并跳转。",
   "firstRun.scopeShortcut": "按 {shortcut} 直接切换到对应作用域。",
   "firstRun.listSearch": "在账号页按 / 聚焦搜索框。",
   "firstRun.dismiss": "知道了",
 
+  // ---- 撤销 toast（P6 T04 §1.4）----
+  // ★ 删除是**软删除**（账号进回收站，可恢复）⇒ 文案写「可撤销」；**不写**「已永久删除」
+  //   （那是 `recycleBin.purge` 的语义）。超时只是 toast 消失，账号**仍在回收站**，
+  //   故文案**不得**暗示「过期即永久删除」（那会让用户以为没救了）。
   "undo.deletedTitle": "已删除，可撤销",
   "undo.batchTitle": "已删除 {n} 个账号，可撤销",
   "undo.action": "撤销",
@@ -167,8 +179,12 @@ export const zh = {
   /* 设置页的入口改成「先看说明」：点开的是说明弹窗，不是直接下载（见 UPDATE-NOTES-ARCH.md）。 */
   "appSettings.update.viewNotes": "查看更新内容",
 
+  // ---- 设置页子导航（P7 §3.9：9 项，第 9 项「备份与恢复」）----
+  // 应用级导航，与 appSettings 同域（§5：应用级放 shell，备份功能放 backup）。
   "settings.subnav.aria": "设置分区",
   "settings.subnav.general": "通用",
+  "settings.scope.global": "全局设置 · 对所有作用域生效，切换作用域不会改变它",
+  "settings.scope.scoped": "仅影响当前作用域（{scope}）· 其他作用域有各自的设置",
   "settings.subnav.account": "账号与登录",
   "settings.subnav.checkin": "签到与积分",
   "settings.subnav.gateway": "网关",
@@ -176,6 +192,10 @@ export const zh = {
   "settings.subnav.client": "客户端",
   "settings.subnav.cli": "CodeBuddy CLI",
 
+  /* ── CodeBuddy CLI 接入方式（issue #109）──
+     这块是「两套凭据通道二选一」，不是偏好开关：两条路都写同一份
+     `~/.codebuddy/settings.json`，混用 ⇒ CLI 把上游 token 发到网关 ⇒ 401，
+     而轮换每轮又重写一次 ⇒ 时好时坏。文案口径见 PR #117 的设计稿。 */
   "wbSettings.cli.stripDirect": "直连上游 · 由本工具按积分到期选号",
   "wbSettings.cli.stripGateway": "走本机网关 · 由网关按模型选号",
   "wbSettings.cli.stripDirectSub": "上游 token 写在 ~/.codebuddy/settings.json，由本工具维护",
@@ -236,6 +256,7 @@ export const zh = {
   "settings.subnav.network": "网络",
   "settings.subnav.backup": "备份与恢复",
 
+  // ---- 网关工作台子导航（PLAN §3.9 / §3.20：7 项，两个产品线共用同一份表；Trae 侧去掉「请求代理」）----
   "gateway.subnav.aria": "网关分区",
   "gateway.subnav.overview": "概览",
   "gateway.subnav.keys": "密钥",
@@ -246,6 +267,9 @@ export const zh = {
 
   // ---- 统一网关（第三个产品线 · 跨作用域）----
   "gateway.subnav.unified": "统一网关",
+  /* ★ 网关页的**两个类型**（2026-10-15，对齐原型 `GW_TYPES` / `.gw-type-seg`）。
+     类型与分区是**两个正交的轴**：类型回答「哪个网关」，子导航回答「这个网关的哪个分区」。
+     ⚠️ 「统一网关」既是类型名也是旧子导航项名 —— 类型化之后**子导航里不再有它**。 */
   "gateway.type.label": "网关类型",
   "gateway.type.independent": "独立网关",
   "gateway.type.unified": "统一网关",
@@ -281,6 +305,10 @@ export const zh = {
   "unifiedGateway.guideModels": "模型名必须带命名空间前缀（如 {sample}）—— 从 /v1/models 自动发现拿到的就是这种形式。",
   "unifiedGateway.guideResponses": "/v1/responses 三条产品线都支持（Trae / Qoder 侧由网关翻译成 chat）。",
   "unifiedGateway.guideKey": "一把统一密钥可同时授权多个命名空间 —— 见「密钥」分区。",
+  /* ── 裸模型名 + 错误响应样例（原型 UNI_ERRORS 的 4 条）──
+     每一条都**带出路**：只说「不支持」会让人反复试错。
+     ★ 2026-10-22：Trae 侧补齐 `/v1/responses`，原「501 endpoint_not_supported_for_namespace」
+     那条示例已删除。 */
   "unifiedGateway.bareModel": "裸模型名",
   "unifiedGateway.bareModelHint": "不带前缀的模型名会被拒绝，并给出可用前缀清单",
   "unifiedGateway.showErrors": "看错误响应",
@@ -296,6 +324,7 @@ export const zh = {
   "unifiedGateway.err.oldPort.body": "模型名 wb-cn:deepseek-v4.1-flash 看起来是统一网关的命名空间前缀，\n但本端口（57891）不解析命名空间。请改用统一网关 http://127.0.0.1:57892/v1，\n或去掉前缀、改用 cn: / global: 前缀。",
   /* 未启用态的一行提示（关着开关时改配置，用户不确定有没有生效）。 */
   "unifiedGateway.notEnabled": "当前未启用：下面的配置会照常保存，启用后生效；端口上现在没有监听，任何调用都会连接失败。",
+  /* 开关旁的**真实监听状态**（issue #52：开关开着 ≠ 端口上有人 accept）。 */
   "unifiedGateway.listening": "监听中",
   "unifiedGateway.notListening": "未监听",
   "unifiedGateway.listeningHint": "端口上已有监听，客户端可以直接连。",
@@ -309,6 +338,9 @@ export const zh = {
   "unifiedGateway.confirmOpen": "确认开放",
   "unifiedGateway.confirm": "确认",
   "unifiedGateway.nsCount": "已启用 {count} / {total} 个",
+  /* ── 账号池分区（跨平台只读汇总）──
+     ★ 统一网关**没有自己的池**：它按命名空间前缀分派到三条产品线各自的池。
+     所以这一区的措辞一律是「汇总 / 只读」，**不要**写成「管理」。 */
   "unifiedGateway.pool.empty": "没有启用任何命名空间",
   "unifiedGateway.pool.emptyHint": "池是按命名空间分派的 —— 先在「命名空间」分区里勾一个。",
   "unifiedGateway.pool.count": "{count} 个池",
@@ -334,6 +366,8 @@ export const zh = {
   "unifiedGateway.nsPoolOf": "共 {total} 个 · 池 {target}",
   "unifiedGateway.pool.show": "看池",
   "unifiedGateway.pool.hide": "收起池",
+  /* 「可用性」四态 + 各自的原因（顺序即优先级，见组件里的 `healthOf`）。
+     ★ 这才是「能不能调通」的判据 —— 「已识别」只是清单识别过，不等于可用。 */
   "unifiedGateway.health.ready": "可调用",
   "unifiedGateway.health.readyHint": "该段背后有可用账号，且已识别到模型。",
   "unifiedGateway.health.noAccount": "无账号",
@@ -355,6 +389,9 @@ export const zh = {
   "unifiedGateway.bindLan": "改为局域网",
   "unifiedGateway.bindLoopback": "改回仅本机",
   "unifiedGateway.port": "端口",
+  /* ★ 2026-10-17 订正：端口按 5789x 一段排开（界面 57890 · WB 57891 · 统一 57892 ·
+     hook 57893 · Trae 57894 · Qoder 57895）。原文混着旧值 7864 / 7865，看不出规律。
+     端口提示是**事实性**内容，漏一个就会让用户撞上去。 */
   "unifiedGateway.portHint": "改端口需重启。别撞上既有端口：界面 57890 · WorkBuddy 57891 · 统一 57892 · hook 57893 · Trae 57894 · Qoder 57895",
   "unifiedGateway.portInvalid": "端口不合法：请输入 1–65535 之间的整数",
   "unifiedGateway.nsTitle": "启用的命名空间",
@@ -382,10 +419,6 @@ export const zh = {
   "unifiedGateway.revoke": "吊销",
   "unifiedGateway.loadFailed": "读取统一网关配置失败",
   "unifiedGateway.saveFailed": "保存失败",
-  "unifiedGateway.created": "密钥已创建",
-  "unifiedGateway.createdHint": "明文只展示这一次（库中只存 sha256），关闭后无法再查看，请立刻复制。",
-  "unifiedGateway.copy": "复制",
-  "unifiedGateway.savedClose": "我已保存，关闭",
   "unifiedGateway.keyName": "名称",
   "unifiedGateway.keyNamePlaceholder": "例如：我的主力 Key",
   "unifiedGateway.authorize": "授权命名空间（至少一个）",
@@ -407,6 +440,11 @@ export const zh = {
   "unifiedGateway.source.cached": "已保存",
   "unifiedGateway.source.builtin": "内置",
 
+  // ---- 设置页「日志」分区 ----
+  // ⚠️ 2026-10-14 实测更正：WorkBuddy **有**自己的运行日志目录
+  //    （`~/.workbuddy/logs/`，按日分目录 + `automation.log`）。
+  //    此前这里写「WorkBuddy 分区的运行日志在网关页可见」—— 网关页显示的是
+  //    **本工具的请求日志**，与客户端的运行日志不是一回事，照着找会白费功夫。
   "settings.logs.emptyTitle": "本分区暂无运行日志",
   "settings.logs.emptyBody":
     "这里只有本工具的设置与备份入口；WorkBuddy 客户端自己的运行日志在其数据目录的 logs 子目录下（本工具暂未接入展示）。",
@@ -458,6 +496,14 @@ export const zh = {
   "appSettings.scopeVisibility.toggleAria": "{scope} 可见性开关",
   "appSettings.scopeVisibility.hint": "隐藏的作用域不再出现在顶栏菜单与快捷键中；URL 直达仍可达。",
   "appSettings.scopeVisibility.onlyOneLeft": "只剩一个作用域可见——不能再隐藏更多",
+
+  // ---- 积分自动刷新（app-settings.tsx；issue #133 复核 §3：打上游默认关）----
+  "appSettings.creditAutoRefresh.groupTitle": "积分自动刷新",
+  "appSettings.creditAutoRefresh.upstreamLabel": "自动向官方查询",
+  "appSettings.creditAutoRefresh.upstreamDesc":
+    "开启后每约 10 分钟向官方查询一次余额与用量。这是真的上游请求，默认关闭 —— 关闭时只在打开页面或手动点击时更新。",
+  "appSettings.creditAutoRefresh.hint":
+    "只读本地快照的视图（Trae 积分 / 账号）不受此开关影响：它们不产生上游请求，会一直自动跟随后台同步。",
 
   // ---- 通用兜底 ----
   "common.unknownError": "未知错误",

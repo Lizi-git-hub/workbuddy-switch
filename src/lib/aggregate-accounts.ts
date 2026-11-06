@@ -1,3 +1,29 @@
+/**
+ * 聚合账号面板的**纯函数层**（issue #50）。
+ *
+ * ## 这一层只做三件事，不碰 React
+ *
+ * ① 把 6 个作用域的账号归一成一种形状（`AggregateAccount`）；
+ * ② 账号键制 `${scope}:${key}` 的拼装与解析（跨作用域**唯一**的身份表示）；
+ * ③ 筛选 / 排序 / 分组的纯计算。
+ *
+ * 之所以刻意不 import React：前端没有单测框架，纯函数才能被
+ * `scripts/check-scope-registry.cjs` 直接读源码 + 用 node 跑断言（同
+ * `update-preference.ts` / `credit-expiry.ts` 的既有做法）。
+ *
+ * ## 为什么必须带 scope 前缀（最容易写错的一处）
+ *
+ * 三个平台的账号主键各自独立，而且**同一个 `userId` 在国内 / 国际是两个不同账号**
+ * （`trae-cn` 与 `trae-global` 各有一份 `jackey`）。聚合页把 6 个作用域铺在一屏，
+ * 裸主键必然串号 —— 勾选一张卡会连带选中另一个作用域的号，刷新转圈会互相吞掉。
+ * 所以：**凡是指向「某个账号」的地方，一律用 `ref`，不用裸主键。**
+ *
+ * ## 「需处理」的口径按平台分开写
+ *
+ * 三个平台的凭据形态不同（WB 是 `expiresAt` + `needsRelogin`；Trae 是 `jwtStatus` +
+ * `jwtExpTimestamp`；Qoder 是 `hasCredential` + `expiresAt`），拿一个字段硬套三处
+ * 必然有一处是错的。这里逐平台判，宁可多写十行。
+ */
 
 import type { AccountMeta } from "@/lib/types";
 import type { QoderAccountView } from "@/lib/api";
@@ -72,6 +98,13 @@ export function makeAggregateAccount(
 
 /* ══════════════════════ 展示 ══════════════════════ */
 
+/**
+ * 展示名。三个平台的「名字」字段不同名（`nickname` / `name` / `name`），
+ * 且都可能是 `null` ⇒ 统一回落到主键，绝不给空串（空串会让卡片标题变一条空白）。
+ *
+ * ⚠️ 这里**不做 HTML 转义**：返回的是纯文本，交给 React 渲染；
+ * 后端返回值仍需过 `displayText`（见 `display-text.ts` 的 issue #2）。
+ */
 export function aggregateDisplayName(account: AggregateAccount): string {
   const raw =
     account.platform === "workbuddy"
@@ -115,26 +148,47 @@ function expiredAt(expiresAt: number | null | undefined, now: number): boolean {
 }
 
 /**
+ * 凭据链条是否断了、必须人工重新登录 / 导入。
+ *
+ * ⚠️ 三平台的凭据字段**刻意不同名**（WB `needsRelogin`；Trae `jwtStatus` + `cooldownType`；
+ * Qoder `hasCredential` + `credential.unrecognized`），拿一个字段硬套三处必有一处错。
+ * 但「需要人动手」这一语义只在这里装配一次 —— 卡片 / 菜单 / 聚合页不许各写一套。
+ *
+ * 会自愈的状态一律不算：Trae 只有 `SessionDead`（上游真的作废了会话）算，
+ * `AuthRejected` / 限流 / 上游抖动都等保活自己好（见 `cooldownNeedsAttention`）。
+ */
+export function credentialNeedsRelogin(account: AggregateAccount): boolean {
+  if (account.platform === "workbuddy") {
+    const a = account.data;
+    return Boolean(a.needsRelogin);
+  }
+  if (account.platform === "trae") {
+    const a = account.data;
+    const dead: TraeJwtStatus[] = ["expired"];
+    if (dead.includes(a.jwtStatus)) return true;
+    // ★ issue #108 §P1-A：改造前聚合页**完全不看** `cooldownType`，于是同一个账号
+    //   在渠道页显示「需重新登录」、在这里显示「一切正常」。会话作废是需要人动手的，
+    //   必须进「待处理」；其余冷却会自己到期，算进来会让这个数字永不为 0。
+    return cooldownNeedsAttention(a.cooldownType);
+  }
+  const a = account.data;
+  // 与 `qoder-account-card` 的 `credentialDead` 同口径：`unrecognized` 是「有东西但认不出」，
+  // 一样只能重新登录 / 导入，漏掉它会让卡片显示「需先登录」而聚合页显示「一切正常」。
+  return !a.hasCredential || a.credential.unrecognized;
+}
+
+/**
  * 该账号是否需要人处理。
  *
  * ⚠️ 与侧栏徽章的 `attentionCount`（只数凭据问题）**不是同一个口径**：
  * 那个说的是「凭据待处理」，这里说的是「今天有事要做」。两者不能互相冒充。
  */
 export function aggregateNeedsAttention(account: AggregateAccount, now: number = Date.now()): boolean {
-  if (account.platform === "workbuddy") {
-    const a = account.data;
-    return Boolean(a.needsRelogin) || expiredAt(a.expiresAt, now);
-  }
-  if (account.platform === "trae") {
-    const a = account.data;
-    const dead: TraeJwtStatus[] = ["expired"];
-    if (dead.includes(a.jwtStatus)) return true;
-    if (cooldownNeedsAttention(a.cooldownType)) return true;
-    return expiredAt(a.jwtExpTimestamp, now);
-  }
-  const a = account.data;
-  if (!a.hasCredential) return true;
-  return expiredAt(a.expiresAt, now);
+  if (credentialNeedsRelogin(account)) return true;
+  // 过期时间轴仍逐平台取，不合并成一个字段：WB/Qoder 用 `expiresAt`，Trae 用 `jwtExpTimestamp`。
+  if (account.platform === "workbuddy") return expiredAt(account.data.expiresAt, now);
+  if (account.platform === "trae") return expiredAt(account.data.jwtExpTimestamp, now);
+  return expiredAt(account.data.expiresAt, now);
 }
 
 /**
@@ -210,6 +264,20 @@ export function isVisible(visible: ReadonlySet<string> | null, ref: string): boo
   return visible === null || visible.has(ref);
 }
 
+/**
+ * 「筛选生效期间新出现的账号」（issue #50 的 Q3 方案 C）。
+ *
+ * ## 为什么需要它
+ *
+ * 可见性是**账号键的集合**，所以筛选生效期间**新入库的账号不在集合里** ⇒ 默认不可见。
+ * 用户会以为「这个账号没被识别出来」。给一条明确的提示 + 一键加入，比让用户自己猜好。
+ *
+ * ## 判定口径
+ *
+ * 只看**当前可见范围之外、但确实存在**的账号。
+ * ⚠️ 「新出现」是**相对筛选偏好**而言，不是相对时间 —— 用户上周设的筛选，
+ * 今天加的账号同样算「新出现」，同样该提示。
+ */
 export function newcomerAccounts(
   all: readonly AggregateAccount[],
   visible: ReadonlySet<string> | null,

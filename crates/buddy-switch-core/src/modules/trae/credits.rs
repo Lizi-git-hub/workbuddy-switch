@@ -46,6 +46,35 @@ pub fn trae_http_client() -> &'static reqwest::Client {
     })
 }
 
+// ---------------------------------------------------------------------------
+// 上游请求头的固定取值
+// ---------------------------------------------------------------------------
+//
+// ## 出处：抓包复刻，不是从客户端源码抄的
+//
+// 下面这些取值来自**参考实现（Python）抓取的真实流量**。核对过客户端本体：
+// `x-market-client-id` / `x-market-user-id` / `x-lscbd-aid` 以及
+// `VSCode 1.107.1 (TRAE SOLO CN)` 这一整串，在 Trae 客户端安装目录里
+// **一个字面量都搜不到**（5141 个文件全扫过，含 `.exe` 与 `.asar`；
+// `TRAE SOLO CN.exe` 里出现的 `x-lgw-req-sdk-type` 只是 TTNet 网络库的
+// 内部默认头名，与本模块无关）。也就是说**无法从客户端源码侧核对它们的正确性**，
+// 只能以「线上实测能用」为准。
+//
+// ## 因此：这些值是线上契约，不要"顺手改成看起来更对的"
+//
+// `TRAE_UA_PRODUCT` 只写了 `TRAE SOLO CN` 一条产品线，而本机实测
+// `Trae CN` 与 `TRAE SOLO CN` 是**可同机并存**的两条产品线（见 `platform` 模块）。
+// 直觉上会想把产品名改成"按探测到的产品动态生成"，但**没有证据支持**：
+//
+// - 服务端是否校验 UA 里的产品名，无从得知（UA 未被任何本地日志记录）；
+// - 真机日志只证明**两条产品线都调用同一个接口**
+//   （`api.trae.cn/trae/api/v2/pay/ide_user_ent_usage`，均返回 200），
+//   并不证明 UA 可以随便换。
+//
+// 所以在拿到「服务端对 UA 不敏感」的实测证据之前，**一律保持现状**。
+// 想改的话，先按 `references` 里的抓包方式验证 Trae CN 的真实 UA，再来动这里。
+// 下面的回归测试会把取值钉死，改了它就会红 —— 那是提醒，不是障碍。
+
 /// UA 括号里的产品名。
 const TRAE_UA_PRODUCT: &str = "TRAE SOLO CN";
 
@@ -133,10 +162,71 @@ fn trace_id() -> String {
     format!("00-{}-01", &uuid[..16])
 }
 
+/// 对 Trae 上游发一个 POST，返回 `(HTTP 状态码, 响应体文本)`。
+///
+/// 约定与参考实现一致：
+/// - 网络层失败返回 `status = 0`，`body` 为错误描述；
+/// - HTTP 错误码（4xx/5xx）**不**转成 `Err`，因为签到需要按状态码分类错误
+///   （401 → 会话失效、429 → 限频），调用方必须拿到原始状态码。
+///
+/// # ⚠️ 未验证的线索：请求体可能是空的（`{}`）
+///
+/// 这里对所有路径都发 `{}`（沿用参考实现）。但**真实 Trae 客户端的请求体不是空的** ——
+/// 从客户端自身的缓存里翻出了它自动生成的 API SDK（`%APPDATA%\TRAE SOLO CN\Cache\Cache_Data\f_*`），
+/// 里面写着：
+///
+/// ```js
+/// GetIdeUserEntUsageV2(e, t) {
+///   let r = e || {},
+///       a = this.genBaseURL("/trae/api/v2/pay/ide_user_ent_usage"),
+///       i = {require_usage: r.require_usage, req_source: r.req_source,
+///            full_data: r.full_data, Request: r.Request};
+///   return this.request({url: a, method: "POST", data: i}, t)
+/// }
+/// ```
+///
+/// 而且同一份缓存里有个**真实调用点**，默认参数是
+/// `{require_usage: true, full_data: true}`，`queryFn` 里也恒为 `full_data: true`：
+///
+/// ```js
+/// function tp(e) {
+///   let t = arguments.length > 1 && void 0 !== arguments[1]
+///       ? arguments[1] : {require_usage: !0, full_data: !0};
+///   return e({url: "/trae/api/v2/pay/user_current_entitlement_list",
+///             method: "POST", data: t})
+/// }
+/// ```
+///
+/// **也就是说真实客户端总是要求 `full_data: true`，而本模块一个字段都不发。**
+/// 若服务端把 `full_data` 默认成 `false`，响应里就不会有完整的
+/// `user_entitlement_pack_list`，[`calc_remaining_credits`] 会直接报
+/// 「响应中缺少 user_entitlement_pack_list」。
+///
+/// **为什么明知可疑却还没改**：本机切换器的 Trae 账号库是空的
+/// （`checkin_accounts.json` 不存在），**这条路径从未对真实上游跑通过**，
+/// 因此"发 `{}` 能用"这个前提本身就没人验证过。同时我也**没有实测证据**
+/// 证明 `full_data: true` 才正确。改线上协议不能靠推理。
+///
+/// **下次有可用账号时的第一步**：先按原样打一次，看响应有没有
+/// `user_entitlement_pack_list`；若没有，再改成
+/// `{"require_usage": true, "full_data": true}` 复测。别凭猜直接改。
 pub async fn post_json(path: &str, jwt_value: &str, device: &DeviceEntry) -> (u16, String) {
     post_json_for(TraeVariant::default(), path, jwt_value, device).await
 }
 
+/// 按**产品线变体**派生的 [`post_json`]。
+///
+/// 端点主机随变体查表（见 [`super::variant`]），路径仍由调用方给。
+/// 默认变体 [`TraeVariant::default`] 即 Trae Work，与 [`post_json`] 等价。
+///
+/// ## 为什么端点必须走变体而不是常量（取证纪律）
+///
+/// 实测两条 CN 产品线（`TRAE SOLO CN` / `Trae CN`）的 `product.json` 里
+/// `*.trae.normal` **逐字相同** —— 即**产品线不改变端点，region 才改变端点**。
+/// 因此本函数只负责「取到该变体登记的那套端点」；变体之间当前取值相同是
+/// **实测结论**而不是巧合，[`super::variant`] 里有回归测试钉死。
+/// 将来若要给某条产品线单独换域，必须**先取到该产品线自己的实测证据**，
+/// 再改那张表 —— 不要在调用点写 `if variant == …`。
 pub async fn post_json_for(
     variant: TraeVariant,
     path: &str,
@@ -228,6 +318,14 @@ pub struct CreditsDailyFile {
     pub snapshots: Vec<CreditsDailySnapshot>,
 }
 
+/// 单个积分包（资源包）的明细。
+///
+/// 源：`user_entitlement_pack_list` 里**逐包**解析而来（改造前只算聚合总额与最早到期，
+/// 把逐包明细丢弃了）。落进 `remaining_credits.json` 的 `packages` 字段，
+/// 经 `credits_overview_for` 透出，供账号卡渲染「积分包进度条」。
+///
+/// 线上/磁盘形状为 camelCase（`packageCode` / `packageName` / `expireAt` /
+/// `expiringSoon`），前端类型 `TraeCreditPackage` 逐字对齐。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreditPackage {
@@ -249,6 +347,19 @@ pub struct CreditPackage {
     pub expiring_soon: bool,
 }
 
+/// 「临期」的判定窗口（秒）—— **14 天**。
+///
+/// ## 为什么从 7 天放宽到 14 天（issue #83 · 3）
+///
+/// 7 天作为「再不用就浪费了」的告警太紧：多数人一周才打开一次这个工具，
+/// 7 天窗口常常在用户下一次打开之前就滑过去了 —— 徽标从来没亮过，积分就过期了。
+///
+/// 为什么不是 30 天：大部分积分包的有效期本身就在 30 天内，30 天窗口会让**几乎所有**
+/// 包都显示「临期」⇒ 这个信号失去区分度，用户会学会无视它。14 天是「两次使用间隔
+/// 的两倍左右」，既能在真正浪费前提醒，又不至于天天红。
+///
+/// ⚠️ 这是**产品口径**，不是技术常量：改它等于改文案的承诺
+/// （`trae.comp.card.chip.expiring` 写的是「N 天内过期」，由本窗口决定 N 的上界）。
 const EXPIRING_SOON_SECS: i64 = 14 * 24 * 3600;
 
 /// 由一组 `user_entitlement_pack_list` 元素解析逐包明细（纯函数，便于单测）。
@@ -280,11 +391,19 @@ pub fn parse_credit_packages(packs: &[Value], now_ts: i64) -> Vec<CreditPackage>
             && expire_at
                 .map(|expire| expire - now_ts <= EXPIRING_SOON_SECS)
                 .unwrap_or(false);
-        let package_name = base
-            .and_then(|info| {
-                info.get("package_name")
-                    .or_else(|| info.get("name"))
-                    .and_then(Value::as_str)
+        // ★ issue #143：包名在 **pack 顶层**（`group_name` / `display_desc`），不在
+        //   `entitlement_base_info` 里 —— 旧实现只读后者，线上命中率恒 0，
+        //   于是所有包都显示成「未命名包」。`entitlement_base_info.package_name`
+        //   保留为最后的兼容回退（旧版本 / 旧缓存可能真有这个形状）。
+        let package_name = ["group_name", "display_desc"]
+            .iter()
+            .find_map(|key| pack.get(*key).and_then(Value::as_str))
+            .or_else(|| {
+                base.and_then(|info| {
+                    info.get("package_name")
+                        .or_else(|| info.get("name"))
+                        .and_then(Value::as_str)
+                })
             })
             .map(str::to_string)
             .filter(|text| !text.trim().is_empty());
@@ -340,8 +459,29 @@ pub struct CooldownEntry {
     pub reason: String,
     #[serde(default)]
     pub error_count: i32,
+    /// 判定时那份 JWT 的 `exp`（Unix 秒）。**凭据指纹**（issue #108 §P0-A）。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// 冷却表只记了「什么错、多久」，**没记「判的是哪一份凭据」**。于是当凭据被换掉
+    /// （OAuth 重新登录 / JWT 续期 / 手动粘贴），那条「会话已死」的判定无法自证失效 ——
+    /// 用户看到的是「重新登录后仍显示需重新登录」，而且重启多少次都一样。
+    ///
+    /// ## 为什么取 `exp` 而不是 access token 原文
+    ///
+    /// 用 token 原文当指纹等于「每次保活刷新都把所有被禁用的号洗白」，三振机制直接被取消
+    /// （WorkBuddy 侧 `pool/mod.rs` 已就此论证过）。`exp` 是**上游签发**的量：真正换到
+    /// 新令牌时它才变；刷新失败时 token 根本不会被写回，因此不会误放行。
+    ///
+    /// ## 兼容性
+    ///
+    /// 旧文件缺这个键 ⇒ `None` ⇒ 按「无指纹」处理，**照旧生效**（保守方向，不会误放行）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_exp: Option<i64>,
+    /// 这条判定**写入的时刻**（Unix 秒，issue #108 §P1-A）。
+    ///
+    /// 前端此前直接把 `reason` 原文渲染成一行红字，用户会把它读成「刚才又失败了」——
+    /// 而事实可能是「11 小时前失败过一次」。带上时刻才能说「11 小时前」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judged_at: Option<i64>,
 }
@@ -392,6 +532,16 @@ pub struct CheckinSummary {
     pub warnings: Vec<String>,
 }
 
+/// 今日已签到台账（跨运行累积，按 `userId`）。
+///
+/// **为什么必须是独立的一份文件**：`CheckinSummary` 记录的是「**最近一次运行**
+/// 处理了哪些账号」，每轮整体覆盖。而「今日已签到」是**跨运行累积、按账号**的事实
+/// —— 打开 `skip_checked_in` 时，一轮只会处理「本轮还没签过的账号」，
+/// 用摘要兼作台账会让上一轮签过的账号在下一轮丢掉标记（徽章显示「未签到」，
+/// 且下一轮又把它重新探测一遍）。
+///
+/// 键必须是 `userId` 而不是显示名：显示名可重复、可修改，用它做键会让两个同名账号
+/// 互相冒充（曾经的实现正是按 `name` 匹配摘要）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CheckinLedger {
     /// 台账归属日（本地时区 `YYYY-MM-DD`）。
@@ -725,6 +875,20 @@ pub async fn calc_remaining_credits(
     ))
 }
 
+/// 「最早到期」：只在**还有剩余**、且 `expire_time > now` 的包里取（纯函数，便于单测）。
+///
+/// ## ★ 为什么必须要求「还有剩余」
+///
+/// 已经用完的包（剩余 0）只要 `expire_time` 还没到，就仍然带着一个「到期时刻」。
+/// 若把它算进去，这个账号会被**伪装成快过期**：徽标显示它的到期日、选号据
+/// [`expiry_urgency`](crate::modules::trae) 把它排到最前 —— 而它真正还有余额的积分
+/// 可能几十天后才到期，真正快过期的账号反而永远轮不到（issue #7）。
+///
+/// 判据在两侧本就不该分家：WorkBuddy 的快过期口径是「把快过期包的**剩余**加总」
+/// （见 `buddy-switch-gateway` 的 `credits_refresh`），空包天然贡献 0；Trae 侧只看
+/// 到期时刻，必须自己排除空包，否则同一条语义在两条产品线上行为相反。
+///
+/// 已过期的包同样不参与：它们的额度已经作废，不构成紧迫度。
 pub fn earliest_live_expire(packs: &[Value], now_ts: i64) -> Option<i64> {
     let mut earliest: Option<i64> = None;
     for pack in packs {
@@ -742,6 +906,7 @@ pub fn earliest_live_expire(packs: &[Value], now_ts: i64) -> Option<i64> {
             .and_then(|usage| usage.get("credits_amount"))
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
+        // ★ 已用完的包不得参与「最早到期」。
         if (limit - used).max(0.0) <= 0.0 {
             continue;
         }
@@ -800,6 +965,13 @@ pub async fn refresh_all_remaining() -> usize {
     refresh_all_remaining_for(TraeVariant::default()).await
 }
 
+/// 批量刷新**该变体**所有账号的剩余积分（按变体分家），返回成功账号数。
+///
+/// 顺带执行**自动解冻**：某账号查询成功且剩余积分 > 0 时清除冷却（**含 `SessionDead`**）。
+///
+/// 判据是「这份凭据刚刚成功访问了上游」—— 一个独立的**正向事实**，不是对
+/// 「账号库变没变」的推断（后者已被 WorkBuddy 侧论证为不可靠）。
+/// issue #108 §P0-C：排除 `SessionDead` 会让永久记录没有任何自愈路径。
 pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
     let accounts = crate::modules::trae::account::entries_for(variant);
     let mut remaining = load_remaining_for(variant);
@@ -819,6 +991,15 @@ pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
                 purchased_today += purchased;
                 succeeded += 1;
 
+                // ★★ issue #108 §P0-C：**取积分成功本身就是会话可用的证据**。
+                //
+                // 改造前这里显式排除 `SessionDead`，理由写的是「会话彻底失效，积分再正常
+                // 也不代表会话可用」。这个理由在**凭据未更新**时也站不住：`calc_remaining_credits`
+                // 用的是同一个 JWT 打上游，它能成功就证明这份凭据有效。
+                //
+                // 后果是闭环死锁：`SessionDead` ⇒ `disabled` ⇒ 不路由（`note_success` 断掉）
+                // ⇒ 签到跳过（`clear_cooldown_for` 轮不到）⇒ 只剩人工「解除冷却」一条路。
+                // 现场证据：积分文件 08:07 仍在刷新，冷却文件停在 10-26 19:40 一动不动。
                 let thawable = should_thaw(credits, cooldowns.cooldowns.get(uid));
                 if thawable {
                     cooldowns.cooldowns.remove(uid);
@@ -856,6 +1037,16 @@ pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
     succeeded
 }
 
+/// 自动解冻的判据（**唯一实现**，issue #108 §P0-C）。
+///
+/// 语义：**这份凭据刚刚成功访问了上游**（取积分成功）⇒ 会话可用 ⇒ 冷却应当清除，
+/// `SessionDead` 也不例外。
+///
+/// 改造前这里显式排除 `SessionDead`，理由是「积分正常不代表会话可用」。该理由在
+/// 凭据未更新时也站不住 —— `calc_remaining_credits` 用同一个 JWT 打上游，它能成功
+/// 就证明这份凭据有效。而排除的后果是**闭环死锁**：
+/// `SessionDead` ⇒ `disabled` ⇒ 不路由（`note_success` 断掉）⇒ 签到跳过
+/// （`clear_cooldown_for` 轮不到）⇒ 只剩人工「解除冷却」一条路，重启也没用。
 pub(crate) fn should_thaw(credits: f64, entry: Option<&CooldownEntry>) -> bool {
     credits > 0.0
         && entry
@@ -867,6 +1058,19 @@ pub(crate) fn should_thaw(credits: f64, entry: Option<&CooldownEntry>) -> bool {
 // 冷却
 // ---------------------------------------------------------------------------
 
+/// 按 HTTP 状态码与业务码分类错误，返回 `(错误类型, 冷却秒数)`。
+///
+/// `冷却秒数` 语义：`-1` = 永久、`0` = 不冷却（仅计数）、`>0` = 冷却秒数。
+///
+/// 分类依据是参考实现在长期使用中总结的经验值，不要随意调小。
+///
+/// ★ issue #108 §P0-B：**先看 body 里的会话作废标记，再按状态码归类**。
+///
+/// - 带 `12153` / `Offline user session not found` ⇒ `SessionDead`（`-1` 永久）；
+/// - 裸 401/403 ⇒ `AuthRejected`（60 秒，可自愈，**不禁用**）。
+///
+/// 改造前 401 一律永久，把「access token 过期」这种保活刷新一轮就好、可自愈的问题
+/// 打成了终态 —— 用户看到的是「号没坏却再也用不了」。
 pub fn classify_error(http_status: u16, code: Option<i64>, body: &str) -> (&'static str, i64) {
     // 200 + 业务码 1005：套餐额度限制，半天内不会有变化。
     if http_status == 200 && code == Some(1005) {
@@ -924,6 +1128,14 @@ pub fn save_cooldown_for(
     save_cooldown_with_credential_for(variant, user_id, error_type, cooldown_seconds, reason, None);
 }
 
+/// 写入冷却，并记下「判定时那份凭据的 `exp`」作为**指纹**（issue #108 §P0-A）。
+///
+/// `credential_exp` 为 `None` 时与 [`save_cooldown_for`] 完全等价（不写指纹 ⇒
+/// 该条判定永远不会因凭据更新而自动失效，即旧行为）。
+///
+/// 传 `Some(exp)` 后，`account_view` 会在渲染时比对当前 JWT 的 `exp`：
+/// 不一致 ⇒ 这条判定针对的是**上一份**凭据，自动失效。于是「重新登录 / 续期 /
+/// 手动粘贴」这些只写账号库、不碰冷却表的出口，**无需改动即可自愈**。
 pub fn save_cooldown_with_credential_for(
     variant: TraeVariant,
     user_id: &str,
@@ -1034,20 +1246,22 @@ mod tests {
     fn parse_credit_packages_extracts_per_package_details() {
         let now = 1_000_000_i64;
         let packs = vec![
+            // 线上真实形状：包名在 **pack 顶层**（`group_name` / `display_desc`），
+            // `entitlement_base_info` 里只有 `quota` / 时间字段（issue #143）。
             serde_json::json!({
                 "entitlement_base_info": {
-                    "package_name": "月卡",
-                    "package_code": "month",
+                    "entitlement_id": "ent-1",
                     "quota": { "credits_limit": 100.0 }
                 },
+                "group_name": "月卡",
+                "display_desc": "月度积分包",
                 "usage": { "credits_amount": 30.0 },
                 "expire_time": now + 3 * 24 * 3600,
             }),
             serde_json::json!({
-                "entitlement_base_info": {
-                    "name": "年卡",
-                    "quota": { "credits_limit": 500.0 }
-                },
+                "entitlement_base_info": { "quota": { "credits_limit": 500.0 } },
+                // 只有 display_desc 时也要能取到名字（回退顺序 group_name → display_desc）。
+                "display_desc": "年卡",
                 "usage": { "credits_amount": 600.0 },
                 "expire_time": now - 10,
             }),
@@ -1057,8 +1271,11 @@ mod tests {
         let packages = parse_credit_packages(&packs, now);
         assert_eq!(packages.len(), 2, "无额度上限的包应被跳过");
 
-        assert_eq!(packages[0].package_name.as_deref(), Some("月卡"));
-        assert_eq!(packages[0].package_code.as_deref(), Some("month"));
+        assert_eq!(
+            packages[0].package_name.as_deref(),
+            Some("月卡"),
+            "包名必须从 pack 顶层取（取 entitlement_base_info 会恒为 None）"
+        );
         assert_eq!(packages[0].total, 100.0);
         assert_eq!(packages[0].remaining, 70.0);
         assert_eq!(packages[0].used, 30.0);
@@ -1066,11 +1283,21 @@ mod tests {
         assert!(!packages[0].expired);
 
         // 已用超过额度 → remaining 下限 0；已过期 → expired 且不再 expiringSoon。
+        assert_eq!(
+            packages[1].package_name.as_deref(),
+            Some("年卡"),
+            "group_name 缺失时应回退 display_desc"
+        );
         assert_eq!(packages[1].remaining, 0.0);
         assert!(packages[1].expired);
         assert!(!packages[1].expiring_soon);
     }
 
+    /// ★ 临期窗口的**边界**（issue #83 · 3）：14 天以内算临期，超过不算。
+    ///
+    /// 这条用例的价值不在于「验证一个常量」，而在于把**产品口径**钉住：
+    /// 窗口从 7 天放宽到 14 天是刻意的（7 天常常在用户下次打开之前就滑过去了）。
+    /// 变异：把 `EXPIRING_SOON_SECS` 改回 7 天 ⇒ 13 天那条变红；改成 30 天 ⇒ 15 天那条变红。
     #[test]
     fn expiring_soon_window_is_fourteen_days() {
         let now = 1_000_000_i64;
@@ -1086,6 +1313,13 @@ mod tests {
         assert!(!far[0].expiring_soon, "15 天后到期不应算临期（窗口 14 天）");
     }
 
+    /// ★★ 护栏（issue #7）：「最早到期」**不得**由已用完的包决定。
+    ///
+    /// 现场：某账号真正还有余额的包 10/30 才到期，但它有一条**已用尽**的包
+    /// 09/30 到期（徽标因此显示「09/30 到期」，而卡片列表里第一条是 10/30 ——
+    /// 列表只显示还有剩余的包）。旧口径把这条空包算进「最早到期」，于是该账号的
+    /// 到期紧迫度被顶到 ≈1.0，恒压过真正今天到期的账号 ⇒「老是消耗那个几十天后
+    /// 才到期的账号」（issue #7）。
     #[test]
     fn earliest_live_expire_ignores_fully_consumed_pack() {
         let now = 1_000_000_i64;
@@ -1266,6 +1500,7 @@ mod tests {
     fn classify_error_maps_known_cases() {
         assert_eq!(classify_error(200, Some(1005), ""), ("PlanLimit", 43_200));
         assert_eq!(classify_error(429, None, ""), ("SoftRate", 60));
+        // ★ issue #108：裸 401 是浅冷却（可自愈）；带作废标记才是永久。
         assert_eq!(classify_error(401, None, ""), ("AuthRejected", 60));
         assert_eq!(classify_error(403, None, ""), ("AuthRejected", 60));
         assert_eq!(
@@ -1320,6 +1555,10 @@ mod tests {
         assert!(!should_thaw(1.0, Some(&empty)));
     }
 
+    /// ★★ issue #108 §P0-A：凭据指纹必须**双向**成立。
+    ///
+    /// - `exp` 变了 ⇒ 判定失效（重新登录 / 续期后自动恢复）；
+    /// - `exp` 未变 ⇒ 判定继续生效（否则保活刷新会洗白所有禁用，三振机制被取消）。
     #[test]
     fn credential_fingerprint_only_invalidates_when_exp_actually_changed() {
         let entry = CooldownEntry {
@@ -1350,6 +1589,9 @@ mod tests {
 
     #[test]
     fn session_dead_cooldown_is_effectively_permanent() {
+        // **带作废标记**的 401：until 必须远大于任何现实时间，否则会话失效会被反复重试。
+        // ★ issue #108：判据从「状态码 401」改成「body 里有 12153」—— 裸 401 已降级为
+        //   60 秒浅冷却（见 `classify_error_separates_session_dead_from_plain_401`）。
         let now = chrono::Local::now().timestamp();
         let (kind, seconds) = classify_error(401, None, r#"{"code":12153}"#);
         assert_eq!(kind, "SessionDead");

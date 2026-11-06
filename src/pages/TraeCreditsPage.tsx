@@ -1,3 +1,33 @@
+/**
+ * 「用量」· **积分视图**（Trae 分区）—— 严格按原型实现（用户 2026-10-12 要求）。
+ *
+ * ## 原型块序（`docs/prototype/demo-app.js:916-996`）
+ *
+ * 1. 顶部说明条 + 「刷新积分」；
+ * 2. 4 统计卡：可用积分合计 / 区间入账 / 区间消耗 / 即将过期；
+ * 3. `每日积分收支`（双向柱）；
+ * 4. g2：`积分余额变化`（面积曲线）| `积分到期分布`（30 天柱）；
+ * 5. g2：`账号 Token 占比`（环形）| `网关状态码分布`（环形）；
+ * 6. `积分流水`表（时间 / 账号 / 变动 / 说明）。
+ *
+ * 改造前本页是 Trae 自建的一套（近 N 日折线 + 账号积分明细表）—— 与原型不符：
+ * 折线换成了双向柱，账号明细表换成了原型真正有的**积分流水**。
+ *
+ * ## 与 WorkBuddy 的差异**只在数据**
+ *
+ * | 维度 | WorkBuddy | Trae（本页） |
+ * |:--|:--|:--|
+ * | 每日收支柱 | **单向**（入账不可得 ⇒ 只画消耗侧） | **双向**（每日快照两侧都有） |
+ * | 两个环形（账号占比 / 状态码） | **无数据源** ⇒ 不渲染 | 有 `accounts` / `statuses` ⇒ 按原型渲染 |
+ * | 合并态 | 后端 `RegionFilter=all` | 前端跨区域聚合（`lib/trae-credits-merge.ts`） |
+ *
+ * 图表一律走共用原语（`CreditDivergingBar` / `CreditBalanceArea` / `CreditExpiryBars` /
+ * `ModelDonut`），单双向由**数据**决定（`CreditDivergingBar` 见 `inAmt > 0` 即画双向）。
+ *
+ * ## 白屏防线
+ *
+ * 账号名过 `displayText`（后端可能吐对象 ⇒ 对象当 React 子节点会卸载整棵树，issue #2）。
+ */
 
 import { useCallback, useMemo, useState } from "react";
 import {
@@ -40,7 +70,7 @@ import {
 import type { TraeRegionId, TraeTokenScope, TraeTokenStatistics } from "@/lib/trae-types";
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
-import { CREDIT_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
+import { CREDITS_LOCAL_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import { balanceCurve, expiryBuckets } from "@/lib/usage-charts";
 import { usageWindowSpanDays } from "@/lib/usage-window";
@@ -48,8 +78,11 @@ import { usageWindowSpanDays } from "@/lib/usage-window";
 /** 原型的两个环形只展示**前 6 名**账号（`accountShare.slice(0, 6)`）。 */
 const ACCOUNT_SHARE_LIMIT = 6;
 
-/** 文案里的「每 N 分钟」从间隔常量推导（与账号卡、WB 积分页同一个来源）。 */
-const REFRESH_INTERVAL_MINUTES = Math.round(CREDIT_REFRESH_INTERVAL_MS / 60_000);
+/**
+ * ⚠️ 这一页**没有**「每 N 分钟」的文案了（issue #133 复核 §3）：它读的是**本地快照**，
+ * 不向上游发请求 ⇒ 「向官方查询一次」是假话，「跟随后台同步」才是事实。文案见
+ * `shared.credit.autoFollow`。
+ */
 
 /**
  * 「用量 · 积分」视图（Trae 分区）。
@@ -62,6 +95,8 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
   const [region] = useTraeVariant();
   const [refreshing, setRefreshing] = useState(false);
   const scope: TraeTokenScope = combineAll ? "all" : region;
+  /* ★ 同 `TraeTokenStatsPage`：拉**覆盖整个窗口**的跨度，再按日历日切片。
+     窗口锚在过去时只拉「窗口天数」会让那段历史根本不在返回里。 */
   const spanDays = usageWindowSpanDays(viewWindow);
 
   /**
@@ -93,7 +128,16 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
     loadSnapshot,
   );
 
-  useAutoRefreshWhenVisible(snapshotAt, revalidateSnapshot);
+  /**
+   * ★ 自动跟随本地快照（issue #133），无手动操作也能看到新余额。
+   *
+   * ⚠️ 只**重读快照**，不调 `traeRefreshCredits`（那才是「去上游同步」，会真的打接口）。
+   * 上游同步由后台 `TRAE_CREDITS_REFRESH_INTERVAL_MS` 循环负责 —— 页面跟着把新读数读回来即可。
+   *
+   * ★ 节拍用 `CREDITS_LOCAL_REFRESH_INTERVAL_MS`（3 分钟）：读本地库零上游成本，比
+   * 后台的 10 分钟写循环更密也无所谓 —— 页面只是「更及时地看到后台刚写进去的数」。
+   */
+  useAutoRefreshWhenVisible(snapshotAt, revalidateSnapshot, CREDITS_LOCAL_REFRESH_INTERVAL_MS);
 
   /**
    * 原型的两个环形（账号 Token 占比 / 网关状态码分布）数据在 **Token 统计**里，
@@ -208,7 +252,7 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
       <div className="flex min-w-0 flex-wrap items-center gap-3">
         <span className="text-[11px] text-muted-foreground">{t("trae.stats.credits.subtitle")}</span>
         <span className="text-[11px] text-muted-foreground">
-          {t("shared.credit.autoEvery", { n: REFRESH_INTERVAL_MINUTES })}
+          {t("shared.credit.autoFollow")}
         </span>
         {/* 「上次刷新」是事实：这份数字何时读到的（绝对时刻；相对时间不会自己走）。 */}
         {snapshotAt > 0 && (

@@ -1,6 +1,6 @@
 [package]
 name = "buddy-switch-gateway"
-version = "20261101.0.0"
+version = "20261106.1.0"
 edition = "2021"
 description = "WorkBuddy API 网关：把 WorkBuddy 模型额度暴露为 OpenAI / Anthropic 兼容端点"
 

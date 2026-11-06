@@ -1,4 +1,28 @@
+/**
+ * Trae 用量 · **数据适配层**（纯函数，可单测）。
+ *
+ * ## 为什么是「映射」而不是「另写一套」
+ *
+ * 原型的「用量」页是**平台无关**的（`demo-app.js` 的 `viewUsage`：同一段代码 + 不同数据），
+ * 所以两平台必须共用同一批图表适配函数。Trae 的载荷形状与 WorkBuddy 不同
+ * （网关日志 vs 客户端会话文件），但**图表需要的维度完全一致**：
+ * 逐日、逐模型×逐日、周×小时、逐账号。
+ *
+ * 于是这里只做一件事：把 `TraeTokenStatistics` **映射**成共用的 `TokenStatsSource` 形状，
+ * 之后 `dailyModelSeries` / `modelSlices` / `heatmapMatrix` **一行不改地复用**
+ * —— 这正是「同一件事只有一份实现」。
+ *
+ * ⚠️ **不要**在这里再写一份堆叠柱 / 热力矩阵的构造逻辑：那会让两平台的
+ * 「分段之和 === 当日总量」「7 行 × 24 列」这类**契约**各自演化。
+ *
+ * ## 积分侧的差异是**数据**差异
+ *
+ * WorkBuddy 的逐日入账**不可得**（`events` 无金额字段）⇒ 单向柱；
+ * Trae 的每日快照**两侧都有**（`earned` / `consumed`）⇒ 同一 `creditBars()` 直接产出双向柱。
+ * 渲染层 `CreditDivergingBar` 按数据自动决定单/双向（P3 决策 #1），不需要平台分支。
+ */
 
+import { TRAE_EXPIRING_SOON_MS } from "@/lib/credit-expiry";
 import type { CreditExpiry, TokenStatsGroup, TokenStatsSource } from "@/lib/types";
 import type {
   TraeDailySnapshot,
@@ -36,6 +60,13 @@ function bucketToGroup(key: string, bucket: Partial<TraeTokenBucket> | undefined
  */
 export function toTokenStatsSource(
   stats: TraeTokenStatistics,
+  /**
+   * 这本账的来源标识。
+   *
+   * Trae 有**两本账**：网关日志（`trae-gateway`）与客户端库导入（`trae-client`）。
+   * 两者形状完全一致，只有来源不同 —— 而来源在账本视图里**是颜色语义**
+   * （客户端青绿 / 网关靛蓝），所以不能像改造前那样写死成网关。
+   */
   source: "trae-gateway" | "trae-client" = "trae-gateway",
 ): TokenStatsSource {
   const daily = (stats.daily ?? []).map((point) => bucketToGroup(point.key ?? "", point));
@@ -110,7 +141,8 @@ export function traeCreditExpiry(
         status: null,
         expireAt,
         expired: expireAt !== null && expireAt <= now,
-        expiringSoon: expireAt !== null && expireAt > now && expireAt - now <= 7 * 86_400_000,
+        expiringSoon:
+          expireAt !== null && expireAt > now && expireAt - now <= TRAE_EXPIRING_SOON_MS,
       };
     });
   return { ok: true, resources };

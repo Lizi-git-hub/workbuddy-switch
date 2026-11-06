@@ -48,6 +48,7 @@ pub fn switch_account_for(
         account_id,
         restart,
         copy_session_ids,
+        &[],
     )
 }
 
@@ -70,6 +71,7 @@ pub fn switch_account_cross(
     account_id: &str,
     restart: bool,
     copy_session_ids: &[String],
+    sync_session_items: &[Value],
 ) -> Result<Value, String> {
     let progress = |message: &str| {
         eprintln!("[switch] progress: {message}");
@@ -84,6 +86,7 @@ pub fn switch_account_cross(
     let backup = auth_file::backup_auth_file_for(region);
 
     let mut copy_report: Option<Value> = None;
+    let mut sync_report: Option<Value> = None;
     if restart {
         progress("正在关闭 WorkBuddy…");
         close_workbuddy_for(region, 20)?;
@@ -98,6 +101,12 @@ pub fn switch_account_cross(
                 &acc,
                 copy_session_ids,
             );
+        }
+        /* 「落后的会话」走**同步**（往目标那份追加新增行），不是再复制一份新的。
+           两者必须在同一个 `restart` 块里：客户端刚被关掉，正是唯一能安全改 jsonl 的窗口。 */
+        if !sync_session_items.is_empty() {
+            progress("正在同步落后会话…");
+            sync_report = Some(session::sync_session_replicas_for(region, sync_session_items));
         }
     }
     progress("正在写入认证文件…");
@@ -116,6 +125,9 @@ pub fn switch_account_cross(
     });
     if let Some(c) = copy_report {
         result["sessionCopy"] = c;
+    }
+    if let Some(s) = sync_report {
+        result["sessionSync"] = s;
     }
     Ok(result)
 }

@@ -795,13 +795,14 @@ export default function TokenStatsPage({
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
 
-  /* 页头「刷新统计」：序号变化 ⇒ 置一次「强制重扫」标记后重跑取数。
-     ⚠️ 只重挂载不够：后端按 (mtime,size) 缓存，文件没变就会复用旧读数 ——
-     而用户点刷新要的是「重新算一遍」这个动作本身。 */
+  /* 页头「刷新统计」：序号变化 ⇒ 重跑取数。
+     **不再自己强制重扫**：强制那一步由页头的 `prefetch` 统一做（Token + 积分一起），
+     这里再强制一次只会把同一份全量扫描干两遍（每次 5~15 秒）。此刻后端缓存已热，
+     非强制重读是秒回的。 */
   const forceNextRef = useRef(false);
   useEffect(() => {
     if ((refreshSeq ?? 0) <= 0) return;
-    forceNextRef.current = true;
+    forceNextRef.current = false;
     setReload((value) => value + 1);
   }, [refreshSeq]);
   /* 三处「重试 / 刷新」出口（错误 Alert、两种空态）共用同一个 reload 触发 ⇒ 共用一个实例。 */

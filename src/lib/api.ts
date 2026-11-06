@@ -771,6 +771,9 @@ function regionArg(region?: Region): Record<string, unknown> {
  * `account-card.tsx` 按 `typeof === "number"` 判定过期，字符串化会让过期提示静默消失。
  */
 function normalizeAccountMeta(account: AccountMeta): AccountMeta {
+  // 桌面命令走 camelCase，webui 下发 snake_case；两侧都归一成同一个展示字段，
+  // 避免「桌面有提示、webui 没有」（上游 #171）。
+  const raw = account as AccountMeta & { refresh_transient_error?: unknown };
   return {
     ...account,
     // `id` 在类型上是非空 `string`；脏值退化成空串，后续按 id 的操作会**响亮失败**
@@ -781,6 +784,9 @@ function normalizeAccountMeta(account: AccountMeta): AccountMeta {
     email: displayText(account.email),
     enterpriseName: displayText(account.enterpriseName),
     needsReloginReason: displayText(account.needsReloginReason),
+    refreshTransientError: displayText(
+      raw.refreshTransientError ?? raw.refresh_transient_error,
+    ),
     remark: displayText(account.remark),
     groupName: displayText(account.groupName),
   };
@@ -1145,7 +1151,13 @@ export function switchAccount(args: {
   region?: Region;
   restart?: boolean;
   copySessionIds?: string[];
-  /** 会话复制的**来源**版本；缺省与 `region` 相同（同版本内切换）。 */
+  /**
+   * 「落后的会话」：切号时**同步**（往目标那份追加新增行），不是再复制一份新的。
+   *
+   * 与 `copySessionIds` 互斥：同一个会话只应出现在其中一边。
+   */
+  syncSessionItems?: { sourceCid: string; targetCid: string }[];
+  /** 会话复制的**来源版本**；缺省与 `region` 相同（同版本内切换）。 */
   sourceRegion?: Region;
 }): Promise<SwitchResult> {
   return call("switch_account", args as unknown as Record<string, unknown>);

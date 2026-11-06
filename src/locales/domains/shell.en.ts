@@ -16,6 +16,8 @@ export const en = {
   "app.name": "Buddy Switch",
   "app.demoBadge": "Demo",
   "product.workbuddy": "WorkBuddy",
+  /* issue #44: "TraeWork" is the retired legacy program line (each region now ships a single
+     merged "Trae" client). The sidebar must use the merged name. */
   "product.trae": "Trae",
   "product.qoder": "Qoder",
   "product.switchAria": "Switch product",
@@ -64,6 +66,8 @@ export const en = {
   "topbar.theme": "Switch theme",
   "topbar.appMenu": "App settings",
 
+  // ---- Page-head scope subtitles (redesign §3.2) ----
+  // Read-only: the only scope switcher lives in the top bar (region is part of L1 scope).
   "pageHead.overview.signedIn": "{scope} · Signed in as {name}",
   "pageHead.overview.signedOut": "{scope} · Not signed in",
   "pageHead.accounts": "{scope} · {n} accounts",
@@ -82,6 +86,7 @@ export const en = {
   "capability.autoRotate": "Auto rotate",
   "capability.sessionCopy": "Session copy",
 
+  // ---- Command palette (⌘K, P6 §3.7) ----
   "palette.entry": "Search or jump",
   "palette.title": "Search or jump",
   "palette.description": "Search accounts, pages, and actions across scopes; press Enter to go.",
@@ -102,17 +107,23 @@ export const en = {
   "palette.action.addAccount": "Add account",
   "palette.action.openDataDir": "Open data folder",
 
+  // ---- Keyboard shortcuts settings (P6 §3.1) ----
   "shortcuts.settings.title": "Keyboard shortcuts",
   "shortcuts.settings.label": "Enable scope shortcuts",
   "shortcuts.settings.description": "Use {mod} + 1…{n} to switch directly to a scope.",
   "shortcuts.settings.degraded": "More than {limit} scopes are available, so number shortcuts are disabled.",
 
+  // ---- First-run hint (P6 §1.5) ----
   "firstRun.title": "Quick start",
   "firstRun.openPalette": "Press {shortcut} to open the command palette and search across scopes.",
   "firstRun.scopeShortcut": "Press {shortcut} to switch directly to a scope.",
   "firstRun.listSearch": "Press / on the accounts page to focus search.",
   "firstRun.dismiss": "Got it",
 
+  // ---- Undo toast (P6 T04 §1.4) ----
+  // Deletion is a soft delete (the account moves to the recycle bin) => "can undo".
+  // Never "permanently deleted" (that is the `recycleBin.purge` semantics), and never
+  // imply that a timeout means permanent deletion — the account stays in the recycle bin.
   "undo.deletedTitle": "Deleted — can undo",
   "undo.batchTitle": "{n} accounts deleted — can undo",
   "undo.action": "Undo",
@@ -178,8 +189,11 @@ export const en = {
   /* The settings entry opens the notes dialog first instead of downloading (see UPDATE-NOTES-ARCH.md). */
   "appSettings.update.viewNotes": "View release notes",
 
+  // ---- Settings sub-nav (P7 §3.9: 9 items, the 9th is "Backup & restore") ----
   "settings.subnav.aria": "Settings sections",
   "settings.subnav.general": "General",
+  "settings.scope.global": "Global setting · applies to every scope; switching scope will not change it",
+  "settings.scope.scoped": "Affects the current scope only ({scope}) · other scopes have their own settings",
   "settings.subnav.account": "Accounts & sign-in",
   "settings.subnav.checkin": "Check-in & credits",
   "settings.subnav.gateway": "Gateway",
@@ -252,6 +266,7 @@ export const en = {
   "settings.subnav.network": "Network",
   "settings.subnav.backup": "Backup & restore",
 
+  // ---- Gateway workspace subnav (PLAN §3.9: 6 items, shared by both product lines) ----
   "gateway.subnav.aria": "Gateway sections",
   "gateway.subnav.overview": "Overview",
   "gateway.subnav.keys": "Keys",
@@ -392,10 +407,6 @@ export const en = {
   "unifiedGateway.revoke": "Revoke",
   "unifiedGateway.loadFailed": "Failed to load the unified gateway config",
   "unifiedGateway.saveFailed": "Save failed",
-  "unifiedGateway.created": "Key created",
-  "unifiedGateway.createdHint": "The plaintext is shown only once (the store keeps sha256 only). Copy it now — it cannot be retrieved later.",
-  "unifiedGateway.copy": "Copy",
-  "unifiedGateway.savedClose": "I've saved it, close",
   "unifiedGateway.keyName": "Name",
   "unifiedGateway.keyNamePlaceholder": "e.g. My main key",
   "unifiedGateway.authorize": "Authorized namespaces (at least one)",
@@ -417,6 +428,10 @@ export const en = {
   "unifiedGateway.source.cached": "Cached",
   "unifiedGateway.source.builtin": "Built-in",
 
+  // ---- Settings "Logs" section ----
+  // ⚠️ Corrected after measuring on 2026-10-14: WorkBuddy DOES keep its own runtime logs
+  //    (`~/.workbuddy/logs/`: per-day folders plus `automation.log`). The earlier wording
+  //    pointed users at the gateway page, which shows THIS tool's request log — a different thing.
   "settings.logs.emptyTitle": "No runtime log in this section",
   "settings.logs.emptyBody":
     "This section only holds this tool's settings and backup entries; WorkBuddy's own runtime logs live in a logs subdirectory of its data dir (not surfaced here yet).",
@@ -470,6 +485,14 @@ export const en = {
   "appSettings.scopeVisibility.toggleAria": "Toggle visibility for {scope}",
   "appSettings.scopeVisibility.hint": "Hidden scopes disappear from the top bar and shortcuts; direct URLs remain accessible.",
   "appSettings.scopeVisibility.onlyOneLeft": "Only one scope left visible — cannot hide more",
+
+  // ---- Credit auto-refresh (app-settings.tsx; issue #133 review §3: upstream off by default) ----
+  "appSettings.creditAutoRefresh.groupTitle": "Credit auto-refresh",
+  "appSettings.creditAutoRefresh.upstreamLabel": "Query upstream automatically",
+  "appSettings.creditAutoRefresh.upstreamDesc":
+    "Queries upstream for balances and usage about every 10 minutes. These are real requests, so this is off by default — when off, data refreshes only on page load or when you click refresh.",
+  "appSettings.creditAutoRefresh.hint":
+    "Views that only re-read local snapshots (Trae credits / accounts) are unaffected: they make no upstream requests and keep following the background sync.",
 
   // ---- Shared fallbacks ----
   "common.unknownError": "Unknown error",

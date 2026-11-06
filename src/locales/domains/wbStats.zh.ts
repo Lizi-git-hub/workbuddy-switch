@@ -13,6 +13,7 @@ export const zh = {
   "wbStats.token.pageTitle": "Token 统计",
   "wbStats.token.bothRegions": "（国内版 + 国际版）",
   "wbStats.token.refresh": "刷新统计",
+  "wbStats.token.refreshFailed": "刷新失败：{error}",
   "wbStats.token.loadFailed": "统计加载失败",
   "wbStats.token.retry": "重试",
 

@@ -9,6 +9,7 @@ export const en = {
   "wbStats.token.pageTitle": "Token statistics",
   "wbStats.token.bothRegions": "(CN + Global)",
   "wbStats.token.refresh": "Refresh stats",
+  "wbStats.token.refreshFailed": "Refresh failed: {error}",
   "wbStats.token.loadFailed": "Failed to load statistics",
   "wbStats.token.retry": "Retry",
 

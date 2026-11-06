@@ -30,6 +30,25 @@ fn save_accounts_to_path(path: &Path, accounts: &[Value]) -> std::io::Result<()>
     atomic_write(path, &content)
 }
 
+/// ★ 账号匹配的**唯一谓词出口**：`id` **或** `uid` 命中即算命中（P5 §2.5 第 (3) 条）。
+///
+/// # 为什么必须是「唯一出口」（真实缺陷形态）
+///
+/// 改造前，**查找 / 备注**按 `id` **或** `uid` 匹配（[`find_account_in`] /
+/// `set_remark_in_path`），而**删除**只按 `id` 匹配。于是「按 uid 选中一批账号再删」
+/// 会**静默空转**：
+///
+/// ```text
+/// 选择集里存的是 uid  →  retain(仅 id) 一个都不命中  →  报「成功」但一条没删
+/// ```
+///
+/// 看起来执行了、实际什么都没发生 —— 比报错坏得多。P5 的软删除（[`trash_account_for`]）/
+/// 恢复（[`restore_account_for`]）/ 永久删除（[`purge_account_for`]）**三者都必须**
+/// 走这个谓词，否则会把同一缺陷原样带进回收站（更隐蔽）。
+///
+/// ⚠️ 本函数是 `id`/`uid` 匹配的**唯一出口**：`find_account_in` /
+/// `trash_account_for` / `restore_account_for` / `purge_account_for` /
+/// `set_remark_in_path` 一律调它，**不得**再各写一遍条件。
 pub fn resolve_account_key(account: &Value, key: &str) -> bool {
     account.get("id").and_then(Value::as_str) == Some(key)
         || account.get("uid").and_then(Value::as_str) == Some(key)
@@ -240,6 +259,11 @@ pub fn current_nickname_for(region: Region, acct: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// 账号的展示元数据（不泄露 token）。对照 server.py `account_meta`。
+///
+/// ⚠️ **展示字段一律过 [`display_str`] 归一**（不要改回 `acc.get(..)` 裸透传）：
+/// 这是 issue #2「Win11 打开一片白」的修复点之一，理由见该函数文档。
+/// 时间戳字段（`expiresAt` 一族）按契约是**数字**，**不参与**字符串归一。
 pub fn account_meta(acc: &Value) -> Value {
     json!({
         "id": display_str(acc, "id"),
@@ -258,6 +282,9 @@ pub fn account_meta(acc: &Value) -> Value {
         "lastUsedAt": acc.get("lastUsedAt"),
         "needsRelogin": acc.get("needs_relogin").and_then(|v| v.as_bool()) == Some(true),
         "needsReloginReason": display_str(acc, "needs_relogin_reason"),
+        // 暂时性刷新失败（断网 / 5xx）：**只挂在刷新返回值上**，不落账号库（issue #171）。
+        // 账号列表读不到时为 null；webui 侧下发 raw Value，前端 `normalizeAccountMeta` 兼容两种键。
+        "refreshTransientError": display_str(acc, "refresh_transient_error"),
         // 用户备注：自由文本，可能缺失或为 null。前端按「有值才渲染」处理。
         //
         // ⚠️ 这里**没有**「凭据是否加密信封」这个字段：那条判据挂在**失败结果**上
@@ -272,6 +299,21 @@ pub fn account_meta(acc: &Value) -> Value {
     })
 }
 
+/// 账号库记录 → 下发前端的展示元数据（**含昵称回落**）。
+///
+/// 与 [`account_meta`] 的唯一区别：库里 `nickname` 可能是客户端 5.6 的**加密信封**
+/// （导入时**刻意原样保留** —— 见 `auth_file::imported_account_from_root` 的注释：
+/// 强转字符串会让 `access_token` 取不到而「导入恒失败」，即便绕过也会在切换写回时
+/// 毁掉客户端登录态）。信封读不出名字，卡片标题就只能显示 uid（2026-09-24 用户报障）。
+///
+/// 因此这里复用 [`current_nickname_for`] 的回落链补一个可读名字：
+/// 记录里的明文昵称 → **客户端明文快照**（按 uid 匹配）→ null。
+/// 注意回落链里那一档「账号库」对**记录自身**必然落空（库里的昵称就是信封），
+/// 所以真正的救兵是客户端快照 —— 这也是它与 `status.current.nickname` 同源的保证。
+///
+/// ★ **所有下发点一律用本函数，不要直接用 [`account_meta`]**：
+/// 漏掉任何一个（备注保存、刷新 token、OAuth 回调、导入返回）都会让该路径下的
+/// 卡片标题**退回 uid**，而其余路径正常 —— 表现为「改个备注名字就变回 id」。
 pub fn account_meta_for(region: Region, acc: &Value) -> Value {
     let mut meta = account_meta(acc);
     let nickname_missing = meta.get("nickname").map(|v| v.is_null()).unwrap_or(true);
@@ -291,6 +333,36 @@ pub fn get_str(v: &Value, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 展示/标识字段归一：任意 JSON 值 → **「字符串或 null」**。
+///
+/// # 为什么需要它（issue #2：Win11 打开后一片白）
+///
+/// 账号相关字段的历史数据里出现过**非字符串**形态 —— 认证文件
+/// `account.nickname` 是对象（AI 生成的展示名带 emoji / 特殊 unicode 时，
+/// 客户端可能把它存成 `{"zh": "…"}` 这类结构）。
+///
+/// 而前端拿到这些字段后**直接当 React 子节点渲染**：
+/// ```text
+/// {workbuddyCurrentName}   // pages/AccountsPage.tsx
+/// <h3>{name}</h3>          // components/account-card.tsx
+/// ```
+/// 对象会让 React 抛 `Objects are not valid as a React child`；当时本仓**没有
+/// 错误边界** ⇒ React 在未捕获的渲染错误上卸载**整棵树**（自 React 16 起的行为，
+/// 19 的 `createRoot` 默认不变）⇒ 侧栏一起消失 ⇒ 用户看到的是一张**纯白窗口**
+/// （而不是「只有 CN 面板空掉」）。
+///
+/// 所以凡是「要交给前端展示 / 拼进字符串」的字段，出口一律过这道归一：
+/// - `String`：原样保留（含空串，语义与历史一致）；
+/// - `Number`：转成文本 —— **纯数字昵称是合法数据**（如 `12345`），不能当脏值丢掉；
+/// - 其余（对象 / 数组 / 布尔 / null / 缺失）：`null`，交给前端既有的 `||`
+///   回落链（`nickname || email || uid || 未知账号`）接管。
+///
+/// 布尔刻意**不**转成 `"true"`：那会让界面把「字段坏了」显示成一个人名，
+/// 属于「静默降级」；落 `null` 才能触发正常的兜底展示。
+///
+/// ⚠️ **只用于展示与标识字段**。`expiresAt` / `refreshExpiresAt` /
+/// `refreshedAt` / `createdAt` 按契约是数字（`src/lib/types.ts` 里
+/// `number | null`），**绝不能**过这道归一，否则会破坏过期判定。
 pub fn display_str(v: &Value, key: &str) -> Value {
     match v.get(key) {
         Some(Value::String(s)) => Value::String(s.clone()),
@@ -678,6 +750,17 @@ mod tests {
         assert_eq!(account_display_name(&json!({})), "unknown");
     }
 
+    /// ★ 现场（2026-09-24 用户截图）：积分统计页「所有账号」下拉与账号列显示的是
+    /// `15bf784e-877b-43dd-904c-853dde62b84c` / `2fa83368-ebd6-4efe-8cd7-4f43b1c31571`
+    /// —— 正是账号库记录里的 **uid**。
+    ///
+    /// 根因：导入时 `nickname` 被**原样保留**成客户端 5.6 的加密信封
+    /// （`{"$wbEncrypted":1,…}`，见 `auth_file::imported_account_from_root`），
+    /// `email` 也是 `null` ⇒ `get_str` 全落空 ⇒ 展示名回落到 uid。
+    /// 明文名字在客户端自己写的骨架快照里，必须接上这一档。
+    ///
+    /// 可证伪：删掉 `account_display_name` 里那段 `client_snapshot_nickname_for`，
+    /// 第 1/3 段即红（返回 uid 而不是名字）。
     #[test]
     fn account_display_name_falls_back_to_client_snapshot_for_envelope_nickname() {
         let dir = std::env::temp_dir().join(format!(
@@ -729,11 +812,11 @@ mod tests {
         write_client_snapshot(
             Region::Global,
             "2fa83368-ebd6-4efe-8cd7-4f43b1c31571",
-            json!("changexbc"),
+            json!("nextagentx"),
         );
         assert_eq!(
             account_display_name(&global_account),
-            "changexbc",
+            "nextagentx",
             "国际版账号必须读国际版目录的快照"
         );
         assert_eq!(
@@ -792,6 +875,10 @@ mod tests {
         assert_eq!(get_str(&json!({"k": 123}), "k"), None);
     }
 
+    /// [`display_str`] 的形状不变量：**只可能产出字符串或 null**。
+    ///
+    /// 这是 issue #2「Win11 打开一片白」的根因护栏 —— 前端把这些字段直接当
+    /// React 子节点渲染，任何非字符串形态都会让 React 卸载整棵树。
     #[test]
     fn display_str_normalizes_to_string_or_null() {
         // 字符串原样保留（含空串：语义与历史一致，前端 `||` 回落链会接管）
@@ -970,6 +1057,11 @@ mod tests {
         assert_eq!(library_display_name_in(&dirty, "uid-4"), None);
     }
 
+    /// ★ 新版客户端的加密昵称 ⇒ `status.current.nickname` 必须回落账号库，而不是显示 uid。
+    ///
+    /// 现场（2026-09-24 用户截图）：`%APPDATA%\...\workbuddy-desktop.info` 里
+    /// `account.nickname` 是 `{"$wbEncrypted":1,"envelope":"…"}`，`display_str` 给 `null`，
+    /// 界面于是显示 `已登录: 31da0a95-6637-4f5e-adee-f7f08a6f86fd`。
     #[test]
     fn current_nickname_falls_back_to_library_for_encrypted_auth_file_name() {
         let dir = std::env::temp_dir().join(format!(
@@ -1053,6 +1145,10 @@ mod tests {
         .expect("write snapshot");
     }
 
+    /// ★ 现场（2026-09-24 用户截图）：客户端 5.6 的认证文件里 `nickname` 是加密信封
+    /// （`$wbEncrypted`），而账号库可能**为空**（用户从未点过「从本机导入」）⇒
+    /// 界面只能显示 uid（`已登录: 15bf784e-…`）。客户端自己写的**明文**骨架快照
+    /// 必须能补上这个名字。
     #[test]
     fn current_nickname_falls_back_to_client_plaintext_snapshot() {
         let dir = std::env::temp_dir().join(format!(
@@ -1097,6 +1193,8 @@ mod tests {
             json!("快照里的新名字")
         );
 
+        // 4) ★ 区域隔离：快照只写在国际版目录时，**国内版视图不得采用**
+        //    （两版账号体系互不污染，不得为了多命中一个名字而跨版读文件）。
         let cn_snapshot = crate::modules::session::session_data_dir(Region::Cn)
             .join("storage")
             .join("skeleton")
@@ -1199,6 +1297,10 @@ mod tests {
         assert!(!is_envelope(&json!({}), "k"));
     }
 
+    /// 信封凭据的**可读错误**：只对信封 `access_token` 触发，明文与缺字段都不误报。
+    ///
+    /// 回归上游 issue #94：信封 token 经 `build_auth_headers` 会被兜底成空 `Bearer`，
+    /// 上游 401 之后把整页 HTML 回显到界面。要在**发请求之前**拦住。
     #[test]
     fn envelope_token_error_only_fires_on_envelope_access_token() {
         let encrypted = json!({
@@ -1217,6 +1319,8 @@ mod tests {
         // 缺字段的历史账号不在此拦截（保持既有行为）。
         assert!(envelope_token_error(&json!({"id": "a3"})).is_none());
 
+        // ★ 只有 refresh_token 是信封时**不**拦：刷新链路会自己报「需重新登录」，
+        //   在这里一并封死会把「还能靠 refresh 救回来」的账号误伤。
         let refresh_only =
             json!({"id": "a4", "access_token": "SECRET", "refresh_token": envelope("r")});
         assert!(
@@ -1272,6 +1376,12 @@ mod tests {
         );
     }
 
+    /// ★ 信封不得覆盖**未过期**的明文 token。
+    ///
+    /// 现场：WorkBuddy 5.6 的认证文件里 `accessToken` 是信封，而账号库里是
+    /// OAuth 扫码（或我方 refresh）写入的**明文**。UI 每次自动 `importLocal`
+    /// 都会拿信封重采集同一 uid ⇒ 明文被冲掉 ⇒ 签到 / 积分 / 网关（都需要明文
+    /// Bearer）**静默失效**（不报错，只是每个请求退化成空 Bearer）。
     #[test]
     fn envelope_reimport_keeps_unexpired_plain_oauth_token() {
         let mut accounts = vec![json!({
@@ -1481,6 +1591,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&test_dir);
     }
 
+    /// ★ 按 **uid** 软删除必须真的移入回收站（P5 §2.5 第 (3) 条 · 验收 12）。
+    ///
+    /// 现场缺陷：删除只匹配 `id`，而查找 / 备注匹配 `id|uid` ⇒ 用 uid 选中批删会
+    /// **静默空转**（报成功、实际 0 条）。本用例钉住修复：软删除 / 恢复 / 永久删除 /
+    /// 查找 / 备注**共用** `resolve_account_key`（`id` **或** `uid`）。
+    ///
+    /// 可证伪：把 `trash_account_for` 的 `resolve_account_key` 换回「仅 `id`」，
+    /// 本用例即红（uid 移不动，`is_err()` 与 `len()` 断言双双失败）。
     #[test]
     fn delete_by_uid_matches_the_same_predicate_as_find() {
         let dir = std::env::temp_dir().join(format!(
@@ -1515,6 +1633,7 @@ mod tests {
             find_account_in(&after, "uid-b").is_some(),
             "另一条不得被误删"
         );
+        // ★ 关键：移入回收站的**条数 == 1**（不是「移 0 条却报成功」）。
         let trash = load_trash_for(Region::Cn);
         assert_eq!(trash.len(), 1, "按 uid 软删除必须真的移入 1 条");
         assert!(resolve_account_key(&trash[0].account, "uid-a"));
@@ -1526,6 +1645,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ★ 软删除 → 恢复**往返无损**（P5 §2.7 · 验收 11）：记录 / 凭据原样回 live。
+    ///
+    /// 可证伪：把 `trash_account_for` 改成硬删除（`retain` + 不写 trash）⇒ 本用例变红。
     #[test]
     fn soft_delete_then_restore_round_trips_losslessly() {
         let dir = std::env::temp_dir().join(format!(
@@ -1568,6 +1690,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ★ 永久删除（purge）从回收站真删；留存 sweep 清过期 + 裁上限（先到先出）。
     #[test]
     fn purge_removes_and_sweep_enforces_retention_and_cap() {
         let dir = std::env::temp_dir().join(format!(
@@ -1651,6 +1774,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 两版账号库必须落到**不同文件**（PRD D2 头号硬约束）。
+    ///
+    /// `region.rs` 只断言了两个 `accounts_filename` 常量不同，但**常量不同 ≠
+    /// `accounts_file_for` 用对了常量**——若该函数写死用 CN 的文件名，常量测试照样绿，
+    /// 而两版账号库会互相覆盖。这里直接钉住函数产出的文件名。
+    ///
+    /// ## 本用例为什么必须持 `env_lock()`
+    ///
+    /// 断言里出现了**两处**无参全局路径（`accounts_file_for` 与 `store_dir()`），
+    /// 它们每次调用都重读进程级 `BUDDY_SWITCH_HOME`。lib 单测在同一进程里并行跑，
+    /// 只要有别的用例（如 `current_nickname_falls_back_to_library_for_encrypted_auth_file_name`
+    /// 的 `HomeOverrideGuard`）在这两次读取之间换掉该变量，就会出现
+    /// 「左侧真实 home、右侧临时 home」的**假失败**（2026-09-24 实测踩到）。
+    /// 症状看起来像竞态，实则是**跨用例的全局状态泄漏**。
+    /// 修法是让本用例与所有改 home 的用例互斥（取 env 锁），不是给断言加容错。
     #[test]
     fn accounts_file_for_is_region_scoped() {
         let _lock = crate::modules::config::env_lock();
@@ -1860,6 +1998,21 @@ mod tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 软删除 + 回收站（P5 §2.7）—— 破坏性操作的**可恢复**落点
+// ---------------------------------------------------------------------------
+//
+// 删除不再从账号库直接抹掉，而是**移入** `accounts.trash.<region>.json`（附
+// `deleted_at` / `expires_at` / `origin_scope`）。恢复把记录移回 live；永久删除
+// （purge）才是**唯一不可逆步**。留存策略：30 天自动清理 + 上限 200 条（先到先出），
+// 由 `BackgroundTask::StartupMaintenance` 跑 [`sweep_all_trash`]（不新增调度器）。
+//
+// ⚠️ **两条硬约束**（P5 §2.7）：
+// 1. trash 路径经 `enum → table` 派生（[`accounts_trash_file_for`]），raw scope 字符串
+//    **从不**进 `PathBuf`；
+// 2. 软删除 / 恢复 / 永久删除**共用** [`resolve_account_key`]（`id` **或** `uid`）谓词 ——
+//    否则「按 uid 批删」会**移 0 条却报成功**，软删除会把这个静默缺陷带进回收站。
+
 /// 回收站留存窗口（毫秒）：30 天。
 pub const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
@@ -2010,6 +2163,7 @@ pub fn sweep_trash_for(region: Region, now: i64) -> usize {
     removed
 }
 
+/// 全部 WB region 的回收站留存清理（`StartupMaintenance` 调用，§2.7 留存策略）。
 pub fn sweep_all_trash() -> usize {
     let now = now_ms();
     Region::all()
@@ -2045,6 +2199,7 @@ pub fn trash_list_value(region: Region) -> Value {
     json!({ "scope": scope_of_wb_region(region).as_str(), "entries": views })
 }
 
+/// 删除账号（CN）—— **软删除**：移入回收站，可恢复（P5 §2.7）。
 pub fn delete_account(account_id: &str) -> Result<(), String> {
     delete_account_for(Region::Cn, account_id)
 }

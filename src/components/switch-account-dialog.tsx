@@ -43,7 +43,7 @@ import {
   type SessionDirNode,
   type SessionTypeNode,
 } from "@/lib/session-tree";
-import { sessionNeedsCopy } from "@/lib/session-replicas";
+import { planSwitchSessions, sessionNeedsCopy } from "@/lib/session-replicas";
 import { useSessionsStore } from "@/stores/sessions";
 import type { AccountMeta, MigrateResult, Region, Session } from "@/lib/types";
 
@@ -282,6 +282,15 @@ export function SwitchAccountDialog({
     [usableSessions],
   );
   const tree = buildSessionTree(usableSessions, t);
+  /* 「点了会发生什么」必须提前说清楚：复制几个、同步几个、跳过几个。
+     与 `runCopy` 用的是同一份 plan，不会出现「确认页说 2 个、实际做 3 个」。 */
+  const selectedPlan = useMemo(() => {
+    const chosen = [...selected].filter((id) => usableIds.has(id));
+    if (!copySessions || !canCompare || !currentUid) {
+      return { copyIds: chosen, syncItems: [], skipped: [] as string[] };
+    }
+    return planSwitchSessions(chosen, sessions, currentUid, targetUid, replicaGroups);
+  }, [selected, usableIds, copySessions, canCompare, currentUid, sessions, targetUid, replicaGroups]);
   const stats = treeSelectionStats(tree, selected);
   /* 空壳会话（db 有行、本机没 jsonl）被 `buildSessionTree` 过滤掉了 ⇒ 空态判据必须看树，
      否则「只有空壳」时会露出一棵空树而不是空态。 */
@@ -400,6 +409,7 @@ export function SwitchAccountDialog({
       }
 
       setProgress(t("wbAccounts.dialog.switchProgress"));
+      const sessionPlan = selectedPlan;
       const res = await api.switchAccount({
         accountId: account.id,
         region,
@@ -407,7 +417,10 @@ export function SwitchAccountDialog({
         // 只有「跨版本」时才显式带来源版本：同版本时它由后端缺省为目标 region，
         // 少传一个字段就少一处与后端默认值漂移的机会。
         sourceRegion: sourceRegion === region ? undefined : sourceRegion,
-        copySessionIds: copySessions ? [...selected].filter((id) => usableIds.has(id)) : undefined,
+        /* 勾选的会话按「目标有没有副本」分流：没有 → 复制（新 id）；有但落后 → 同步（追加）。
+           不拆的话，落后的会话会被复制的账本去重直接跳过，用户点了「下一步」什么也不会发生。 */
+        copySessionIds: copySessions ? sessionPlan.copyIds : undefined,
+        syncSessionItems: copySessions ? sessionPlan.syncItems : undefined,
       });
       const nickname =
         accountDisplayName(account);
@@ -415,6 +428,10 @@ export function SwitchAccountDialog({
       const copiedOk = (res.sessionCopy?.copied ?? []).filter((c) => c.jsonlCopied);
       if (copiedOk.length) {
         parts.push(t("wbAccounts.dialog.copiedSessions", { n: copiedOk.length }));
+      }
+      const syncedOk = (res.sessionSync?.results ?? []).filter((item) => item.ok).length;
+      if (syncedOk > 0) {
+        parts.push(t("wbAccounts.dialog.syncedSessions", { n: syncedOk }));
       }
       if (res.sessionCopy?.skipped?.length) {
         parts.push(t("wbAccounts.dialog.skippedSessions", { n: res.sessionCopy.skipped.length }));
@@ -673,6 +690,16 @@ export function SwitchAccountDialog({
                         {hiddenEmptySessions > 0 ? (
                           <p className="mb-2 text-xs text-muted-foreground">
                             {t("wbAccounts.dialog.emptySessionsHidden", { n: hiddenEmptySessions })}
+                          </p>
+                        ) : null}
+                        {copySessions &&
+                        (selectedPlan.copyIds.length > 0 || selectedPlan.syncItems.length > 0) ? (
+                          <p className="mb-2 text-xs text-muted-foreground" data-switch-plan>
+                            {t("wbAccounts.dialog.planSummary", {
+                              copy: selectedPlan.copyIds.length,
+                              sync: selectedPlan.syncItems.length,
+                              skip: selectedPlan.skipped.length,
+                            })}
                           </p>
                         ) : null}
                         <SessionTree

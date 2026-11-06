@@ -132,6 +132,8 @@ export const en = {
   "aggregate.detail.qoderPackBonus": "Bonus pack",
   "aggregate.detail.qoderPackDedicated": "Dedicated pack",
   "aggregate.detail.packFallbackName": "Credit pack",
+  "aggregate.detail.packExpired": "Expired",
+  "aggregate.detail.packForever": "Never expires",
   "aggregate.detail.groupSaved": "Group saved",
 
   // ---- Export (per scope: the export command is single-scope) ----
@@ -144,6 +146,8 @@ export const en = {
   "aggregate.export.platform.qoder": "Qoder",
   "aggregate.export.done": "Exported {n} accounts",
   "aggregate.toast.switching": "Switching…",
+  // Delete confirmation (issue #89 · 2.3): the undo toast is a remedy, not a substitute
+  // for asking first.
   "aggregate.delete.title": "Delete account",
   "aggregate.delete.body": "Delete “{name}”? You can restore it right away with the “Undo” action in the toast.",
   "aggregate.delete.batchBody": "Delete the {n} selected accounts? You can restore them right away with the “Undo” action in the toast.",

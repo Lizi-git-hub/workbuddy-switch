@@ -12,6 +12,32 @@
  * 键前缀：`trae.comp.`
  */
 export const zh = {
+  // =====================================================================
+  // trae-types.ts —— 程序位 / 标识的展示名
+  // =====================================================================
+  // 品牌名中英同形，仍走词表：新增程序位时 `TranslationKey` 会编译期提醒补英文条目。
+  //
+  // ★★ 命名规则（用户确认，2026-10-13 更正）：**国内版带 ` CN` 后缀、国际版不带后缀**。
+  // 六个名字**逐字等于客户端自己的字符串**（`nameAlias` / `nameShort`，本机 `product.json`
+  // 实测）⇒ 一个都不是我们编的：
+  //
+  //   | 程序位 | 国内版 | 国际版 |
+  //   |:---|:---|:---|
+  //   | TraeWork | `TraeWork CN` | `TraeWork` |
+  //   | TraeCode | `TraeCode CN` | `TraeCode` |
+  //   | Trae（合并版） | `Trae CN` | `Trae` |
+  //
+  // ⚠️ 更正前的约定是「国际版带 `AI` 后缀」—— 那是**错的**：它凭空造了
+  // `Trae AI` / `TraeWork AI` 这类客户端根本不用的名字，而且 `Trae AI` 会同时指
+  // 国际 TraeCode 与国际合并版（Key 归属下拉里两个同名选项）。
+  // 六个名字两两不同有两条护栏：Rust `region::tests::六个程序位的展示名两两不同`
+  // + 跨语言门禁（本表兜底值 vs `region.rs` 的 `display_name`）。
+  //
+  // ⚠️ `traeWork` / `traeCode` / `trae` 三个**区域无关**的键（`traeProgramLabel` 用）
+  // 保持不带区域后缀的家族名；带区域的那几个键见下。
+  // 合并后的客户端（issue #20）：客户端自己就叫 `Trae CN` / `Trae`。
+  // 两者是**各自独立的变体**（`trae_merged` / `global_trae_merged`），
+  // 标识与快照目录都与 `traeCode*` 不同。
   "trae.program.trae": "Trae",
   "trae.program.traeCn": "Trae CN",
   "trae.program.traeGlobal": "Trae",
@@ -52,6 +78,10 @@ export const zh = {
   // ---- 到期 ----
   "trae.comp.card.expiry.permanent": "长期有效",
   "trae.comp.card.expiry.short": "{date} 到期",
+  // ⚠️ 2026-10-12：卡片按原型删掉「大数字行 + 近期到期逐包列表」后，
+  // `expiry.cooldownUntil` / `expiry.earliest` / `expiry.none` / `expiry.noneShort`
+  // 与 `section.expiring` / `package.tip` / `package.remaining` / `package.empty`
+  // 均已无引用，一并删除。
 
   // ---- 正文行标签 ----
   "trae.comp.card.label.device": "设备",
@@ -62,10 +92,15 @@ export const zh = {
 
   // ---- 状态标签 ----
   "trae.comp.card.chip.checked": "已签到",
+  // ★ 2026-10-12：与 WorkBuddy 卡片**同一组槽位**（原型对两个平台用同一个渲染器）。
   "trae.comp.card.chip.toolsInUse": "使用中 {n} 个工具",
   "trae.comp.card.chip.expired": "凭据已过期",
   "trae.comp.card.chip.needRelogin": "需重新登录",
+  // 「{amount} 积分 {days} 天内过期」——issue #44：金额是窗口内**全部**临期之和，
+  // 天数取其中最晚那一刻，故只能写「天内」（写「天后」会把不同批次混成一句话，是假话）。
   "trae.comp.card.chip.expiring": "{amount} 积分 {days} 天内过期",
+  // issue #83 · 3 后半：卡片上要能看到**逐包**的名称 / 剩余 / 到期，而不是只有汇总。
+  // 落点是浮层（卡片是 4 块 / 243px 的固定版式，塞第五块会挤掉「当前登录」徽章）。
   "trae.comp.card.packs.title": "积分包明细（{n}）",
   "trae.comp.card.packs.line": "{name} · 剩 {remaining}/{total} · {expire} 到期",
   "trae.comp.card.packs.lineExpired": "{name} · 剩 {remaining}/{total} · {expire} 已过期",
@@ -100,6 +135,9 @@ export const zh = {
   "trae.comp.card.switch.aria": "切换到 {label}",
   "trae.comp.card.switch.ariaBusy": "正在切换到 {label}",
   "trae.comp.card.switch.busy": "切换中…",
+  // ⚠️ 2026-10-10：原「跨区域程序位引导切区域」两条文案（`regionHint` / `guideRegion`）已删除。
+  //    用户要求**国内版不显示国际版的程序位** ⇒ `programsFor` 只返回本区域程序位，
+  //    跨区域按钮永远不出现，那两条文案再无引用（`guideRegion` 在此之前就已无引用）。
 
   // ---- 操作菜单 ----
   "trae.comp.card.manage.aria": "管理账号 {name}",
@@ -115,23 +153,36 @@ export const zh = {
 
   // ---- 积分区 ----
   "trae.comp.card.credits.remaining": "剩余积分",
+  // issue #44：原文案让用户「点右上角菜单『刷新积分』」，而菜单里根本没有这一项 ——
+  // 现在提示只说事实，出口是同一行右侧那枚真的能点的按钮。
   "trae.comp.card.credits.notQueried": "尚未查询到积分",
   "trae.comp.card.credits.refresh": "刷新积分",
   "trae.comp.card.section.info": "账号信息",
-  "trae.comp.card.package.fallback": "积分包",
   "trae.comp.card.package.used": "已用 {n}",
+  "trae.comp.card.package.fallback": "积分包",
+  // P4：抽屉 `DetailPack` 的「已用 / 到期」文本（与 WorkBuddy 抽屉同形，各平台自持文案）。
   "trae.comp.card.package.expired": "已到期",
 
+  // ---- 操作说明（作为「更多」菜单项的 `title`）----
+  // P4：卡片瘦身把页脚的「保存登录态 / 刷新 JWT」两枚按钮收回菜单（菜单本就有同名项），
+  // 原来的说明文案改挂在菜单项的 `title` 上 —— 不可用时的**原因**不能一起丢掉。
+  // ★ 必须说明「会先关客户端」：备份是文件拷贝，客户端运行时 Cookie / leveldb / SQLite WAL
+  //   被独占锁定，此时拷出来的快照是坏的（切过去会变成未登录）。用户得知道客户端会重启一次。
   "trae.comp.card.action.saveTip": "把客户端此刻的登录态保存到该账号名下（切换时用它恢复）；会先关闭并重新打开客户端",
   // 保存的目标只能是「该账号此刻登录着的那个程序位」—— 一个都没有时后端守卫也会拒绝，
   // 所以就地禁用并说明，别让用户点了再吃一句看不懂的拒绝。
   "trae.comp.card.action.saveNoLogin": "该账号当前没有登录在任何 Trae 客户端上 —— 先在客户端里登录它，再保存",
   "trae.comp.card.action.refreshJwtTip": "用 refresh token 换一份新的 JWT",
+  // issue #44：这条说明挂在两个入口上（积分提示行的按钮 / 菜单项）—— 要写清「只动这一个账号」，
+  // 否则用户仍会以为必须全选账号才能刷。
   "trae.comp.card.action.refreshCreditsTip": "只重新查询该账号的剩余积分，不必全选账号批量刷新",
   "trae.comp.card.footer.updatedAt": "{time} 更新",
   "trae.comp.card.footer.noUpdate": "未记录更新时间",
   "trae.comp.card.footer.updatedTip": "该账号在本地账号库中的最近更新时间",
 
+  // ---- 卡片头部与指标行（原型 `.acct-top` / `.acct-metrics`）----
+  // ★ 与 WorkBuddy 卡片**同名同义**（`wbAccounts.card.currentLogin` / `.metric.*`）：
+  //   两个产品分区的卡片是同一套结构，文案也不该各写一版。
   "trae.comp.card.currentLogin": "当前登录",
   "trae.comp.card.metric.credits": "积分",
   "trae.comp.card.metric.expiry": "到期",
@@ -178,6 +229,7 @@ export const zh = {
   "trae.comp.oauth.retryBusy": "正在发起登录…",
   "trae.comp.oauth.launch": "启动 {variant} 客户端",
   "trae.comp.oauth.launchBusy": "正在启动 {variant} 客户端…",
+  // ---- 远程 / 无客户端部署（issue #62）：授权页要探 127.0.0.1:17388 ----
   "trae.comp.oauth.tunnel.title": "远程部署要多一步：授权页会探本机 {port}",
   "trae.comp.oauth.tunnel.desc": "Trae 授权页停在「认证中」时会去探 127.0.0.1:{port} 确认客户端在线。服务器上没有这个端口，而你点授权的浏览器在自己电脑上 —— 先在自己电脑开一条端口转发接过去，转发后别关终端：",
   "trae.comp.oauth.tunnel.copy": "复制命令",

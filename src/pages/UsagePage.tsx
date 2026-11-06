@@ -2,6 +2,8 @@
 import { lazy, Suspense, useState, type ElementType } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 
+import { toast } from "sonner";
+
 import { Button } from "@/components/ui/button";
 import { useLocation } from "react-router-dom";
 
@@ -9,6 +11,7 @@ import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ViewParamBar } from "@/components/usage/view-param-bar";
+import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { type Product, platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf } from "@/lib/scope";
@@ -17,6 +20,7 @@ import { useScope } from "@/lib/use-scope";
 import { readPreferredCombineAll } from "@/lib/usage-params";
 import { type UsageLedger } from "@/lib/usage-ledger";
 import { DEFAULT_USAGE_WINDOW, type UsageWindow } from "@/lib/usage-window";
+import type { RegionFilter } from "@/lib/types";
 import type { TranslationKey } from "@/locales/zh";
 
 /* 四个页面**各自 lazy**（见文件头注释）。 */
@@ -49,6 +53,17 @@ const USAGE_PAGES: Record<
     tokens: ElementType;
     credits: ElementType;
     tokenViews: boolean;
+    /**
+     * 页头「刷新统计」的**预取**：把该平台两个数据源各自强制取一次。
+     *
+     * 为什么要在这里做：三个页签的数据来自**两个**后端（Token 扫描 / 官方积分账单），
+     * 而页签是懒挂载的 —— 只让「当前页签」自己刷，切到另一个页签还得再等十几秒。
+     * 由页头统一预热，子页随后只做「非强制重读」（后端缓存已热 ⇒ 秒回），
+     * 既做到「一键全刷」，也不会把同一份重活干两遍。
+     *
+     * 缺省 = 该平台没有需要强制重采的慢数据源（保持原有行为）。
+     */
+    prefetch?: (filter: RegionFilter) => Promise<unknown>;
     /** 该平台的数据源能否**跨区域合并**（决定参数条要不要渲染合并态控件）。 */
     mergeScopes: boolean;
     ledger: boolean;
@@ -58,6 +73,12 @@ const USAGE_PAGES: Record<
     tokens: TokenStatsPage,
     credits: CreditStatsPage,
     tokenViews: true,
+    /* Token 全量重扫 + 官方积分账单重采，并行；任一失败都会 reject ⇒ 页头弹一次错误。 */
+    prefetch: (filter) =>
+      Promise.all([
+        api.getTokenStatistics(undefined, filter, true),
+        api.getCreditStatistics(true, filter),
+      ]),
     mergeScopes: true,
     ledger: false, // ⚠️ 本 fork：网关已下线 ⇒ 不再有账本切换（恒为客户端）
   },
@@ -201,9 +222,21 @@ export default function UsagePage({ defaultTab = "trend" }: { defaultTab?: Usage
           size="default"
           disabled={busy}
           onClick={() =>
-            void run(() => {
-              /* 两个动作：刷新序号驱动子页**强制重采**，reloadKey 兜底重挂载。 */
-              setRefreshSeq((value) => value + 1);
+            void run(async () => {
+              const filter: RegionFilter = combineAll ? "all" : region;
+              const prefetch = USAGE_PAGES[product].prefetch;
+              try {
+                /* 先把该平台的两个数据源都强制重采一遍（WB：Token 全量重扫 + 官方账单），
+                   按钮在这期间一直转 —— 用户点完能看见「在干活」，而不是秒回却什么都没变。 */
+                if (prefetch) await prefetch(filter);
+              } catch (error) {
+                toast.error(t("wbStats.token.refreshFailed"), {
+                  description: api.asError(error),
+                });
+              } finally {
+                /* 预取完成后子页只做「非强制重读」：后端缓存已热，切页签也是新数。 */
+                setRefreshSeq((value) => value + 1);
+              }
             })
           }
         >

@@ -20,7 +20,7 @@ import { useUsageWindowLabel, type UsageViewProps } from "@/components/usage/vie
 import * as api from "@/lib/api";
 import { balanceCaption, singleSideCaption } from "@/lib/chart-caption";
 import { formatDate } from "@/lib/format";
-import { CREDIT_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
+import { CREDITS_UPSTREAM_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
 import { displayText } from "@/lib/display-text";
 import { useT } from "@/lib/i18n";
@@ -54,7 +54,7 @@ import { useAccountsStore } from "@/stores/accounts";
 const statisticsCache: Partial<Record<RegionFilter, { data: CreditStatistics; at: number }>> = {};
 
 /** 文案里的「每 N 分钟」从间隔常量推导 —— 常量改了文案不会说谎。 */
-const REFRESH_INTERVAL_MINUTES = Math.round(CREDIT_REFRESH_INTERVAL_MS / 60_000);
+const REFRESH_INTERVAL_MINUTES = Math.round(CREDITS_UPSTREAM_REFRESH_INTERVAL_MS / 60_000);
 
 export default function CreditStatsPage({
   viewWindow,
@@ -86,7 +86,9 @@ export default function CreditStatsPage({
      不能只靠重挂载 —— 重挂载会命中 `statisticsCache` 里的旧数据。 */
   useEffect(() => {
     if (refreshSeq <= 0) return;
-    void load(region, true, true);
+    /* 后端已被页头 `prefetch` 强制重采过 ⇒ 这里只绕过**本地** module 缓存去读新数，
+       不再传 refresh=true（那会把官方账单再拉一遍，十几秒白等）。 */
+    void load(region, false, true, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshSeq]);
 
@@ -105,8 +107,8 @@ export default function CreditStatsPage({
   }, [wbAccounts, globalAccounts]);
 
   const load = useCallback(
-    async (target: RegionFilter, refresh = false, silent = false) => {
-      if (!refresh && statisticsCache[target]) {
+    async (target: RegionFilter, refresh = false, silent = false, bypassCache = false) => {
+      if (!refresh && !bypassCache && statisticsCache[target]) {
         const cached = statisticsCache[target]!;
         setStats(cached.data);
         setLastRefreshAt(cached.at);

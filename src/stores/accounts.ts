@@ -80,6 +80,13 @@ interface AccountsState {
   creditMap: Record<string, CreditExpiry>;
   creditLoadingMap: Record<string, boolean>;
   refreshingCredits: boolean;
+  /**
+   * 各 region「上一次积分取数完成」的墙钟（`0` = 本次会话还没取过）。
+   *
+   * ★ 必须**按 region 分开记**（issue #133）：自动刷新要判断「这一区是否已经过期」，
+   * 共用一份时间会让刚切过去的另一个区被判成新鲜而跳过刷新。
+   * 它只服务自动刷新与「上次刷新」提示，**不参与**任何数据口径判断。
+   */
   creditRefreshedAt: Record<Region, number>;
   // —— 国际版 ——
   global: RegionSlice;
@@ -109,7 +116,12 @@ interface AccountsState {
   ) => Promise<void>;
   importLocal: (region?: Region) => Promise<AccountMeta>;
   reconcileAccounts: (region?: Region) => Promise<void>;
+  /** 两个 region 的账号列表一起重拉（60s 轮询用；不设 loading）。issue #171。 */
+  reconcileAllAccounts: () => Promise<void>;
 }
+
+/** 轮询重拉账号列表的 in-flight 去重：避免与页面加载 / 相邻 tick 并发时旧列表覆盖新列表。 */
+let accountsReconcileInflight: Promise<void> | null = null;
 
 async function loadRegion(region: Region): Promise<void> {
   useAccountsStore.setState((s) => regionPatch(s, region, { loading: true, error: null }));
@@ -194,6 +206,22 @@ export const useAccountsStore = create<AccountsState>((set, get) => ({
   async reconcileAccounts(region = "cn") {
     const { accounts } = await api.getAccounts(region);
     set((s) => regionPatch(s, region, { accounts }));
+  },
+
+  async reconcileAllAccounts() {
+    // 与 `refreshAllStatus` 同形：两个 region 各自独立，一个失败不影响另一个。
+    // 只写 accounts、不设 loading（60s 轮询不该闪骨架屏）；逐 region 吞错保留旧值。
+    if (accountsReconcileInflight) return accountsReconcileInflight;
+    const inflight = Promise.all([
+      get().reconcileAccounts("cn").catch(() => {}),
+      get().reconcileAccounts("global").catch(() => {}),
+    ])
+      .then(() => undefined)
+      .finally(() => {
+        accountsReconcileInflight = null;
+      });
+    accountsReconcileInflight = inflight;
+    return inflight;
   },
 }));
 

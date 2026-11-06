@@ -34,7 +34,7 @@ const host = process.env.TAURI_DEV_HOST;
 // @ts-expect-error process is a nodejs global
 const pagesRepoSlug =
   // @ts-expect-error process is a nodejs global
-  process.env.GITHUB_REPOSITORY?.split("/")[1] || "qoder-trae-workbuddy-switch";
+  process.env.GITHUB_REPOSITORY?.split("/")[1] || "workbuddy-switch";
 // @ts-expect-error process is a nodejs global
 const base =
   process.env.VITE_BASE ??

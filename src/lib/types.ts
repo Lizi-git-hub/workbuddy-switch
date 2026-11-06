@@ -32,6 +32,11 @@ export interface AccountMeta {
   needsRelogin: boolean;
   needsReloginReason: string | null;
   /**
+   * 最近一次刷新因断网 / HTTP 5xx **暂时**失败的可读原因（上游 #171）。
+   * 只挂在刷新返回值上，不落账号库；账号列表读不到时为 null / 缺失。
+   */
+  refreshTransientError?: string | null;
+  /**
    * 用户自填备注（例如「DS4.1 额度 · 10/03 解禁」）。
    *
    * 后端**原样透传**：未设置时为 `null` 或缺失，前端按「有值才渲染」处理。
@@ -354,6 +359,13 @@ export interface SessionReplica {
   sessionId: string;
   /** 副本所在 region（本期恒为**当前 region**，跨 region 边不引入，P8 ✅ #2）。 */
   region: Region;
+  /**
+   * 本机是否有这份副本的正文（`projects/<cid>.jsonl` 存在）。
+   *
+   * 后端按 projects 索引直给：`list_sessions` 只覆盖**当前账号**，拿它推断会把
+   * 其他账号的副本全标成「没有历史」。
+   */
+  hasHistory?: boolean;
 }
 
 /**
@@ -473,11 +485,13 @@ export interface SessionReplicaGroup {
   titles?: SessionReplicaTitle[];
 }
 
-/** 副本标题（[`SessionReplicaGroup.titles`] 的元素）。 */
+/** 副本在 `sessions` 表里的元数据（[`SessionReplicaGroup.titles`] 的元素）。 */
 export interface SessionReplicaTitle {
   uid: string;
   cid: string;
   title: string;
+  /** 该副本在库里的 `updated_at`（毫秒时间戳）；库/列/行取不到时为 null。 */
+  updatedAt?: number | null;
 }
 
 /** 组内一条「上次一致点」的展示形态（**不含逐行 hash** —— 校验在 core 做）。 */
@@ -918,6 +932,10 @@ export interface SwitchResult {
     /** 因已存在存活副本而被跳过的会话（去重命中）。 */
     skipped?: CopyResult[];
     errors?: { id: string; error: string }[];
+  };
+  /** 「落后会话」的同步结果（切号时往目标那份追加新增行；不新建会话）。 */
+  sessionSync?: {
+    results?: { sourceCid: string; targetCid: string; ok: boolean; error?: string | null }[];
   };
 }
 

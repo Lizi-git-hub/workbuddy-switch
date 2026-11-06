@@ -2855,6 +2855,21 @@ pub fn list_replica_groups_for(region: Region) -> Value {
                 "titles".to_string(),
                 session_titles_with(titles_conn.as_ref(), &entry.members),
             );
+            /* 逐副本标「本机有没有正文」。前端原来只能从 `list_sessions` 推断，而那条命令
+               只回**当前账号**的行 ⇒ 其他账号的副本永远不带「有历史」徽标（看起来像空壳）。 */
+            let replicas: Vec<Value> = entry
+                .members
+                .iter()
+                .map(|(uid, cid)| {
+                    json!({
+                        "accountUid": uid,
+                        "sessionId": cid,
+                        "region": region.as_str(),
+                        "hasHistory": projects.contains_key(cid),
+                    })
+                })
+                .collect();
+            object.insert("replicas".to_string(), json!(replicas));
         }
         groups.push(json);
     }
@@ -3062,25 +3077,47 @@ fn session_titles_with(conn: Option<&Connection>, members: &[(String, String)]) 
     let columns = table_columns(conn, "sessions");
     let has_custom = columns.iter().any(|c| c == "custom_title");
     let has_user = columns.iter().any(|c| c == "user_id");
+    /* 旧库可能没有 `updated_at`：有就读，没有就退化成 NULL（不能拼出一条必然报错的 SQL）。 */
+    let has_updated = columns.iter().any(|c| c == "updated_at");
     let extra = if has_custom { ", custom_title" } else { ", NULL" };
+    let updated = if has_updated { ", updated_at" } else { ", NULL" };
     for (uid, cid) in members {
-        let title = if has_user {
+        let row_data = if has_user {
             conn.query_row(
-                &format!("SELECT title{extra} FROM sessions WHERE id = ?1 AND user_id = ?2 LIMIT 1"),
+                &format!(
+                    "SELECT title{extra}{updated} FROM sessions WHERE id = ?1 AND user_id = ?2 LIMIT 1"
+                ),
                 rusqlite::params![cid, uid],
-                |row| Ok(session_display_title(row.get(0).ok(), row.get(1).ok())),
+                |row| {
+                    Ok((
+                        session_display_title(row.get(0).ok(), row.get(1).ok()),
+                        row.get::<_, Option<i64>>(2).ok().flatten(),
+                    ))
+                },
             )
             .ok()
         } else {
             conn.query_row(
-                &format!("SELECT title{extra} FROM sessions WHERE id = ?1 LIMIT 1"),
+                &format!("SELECT title{extra}{updated} FROM sessions WHERE id = ?1 LIMIT 1"),
                 rusqlite::params![cid],
-                |row| Ok(session_display_title(row.get(0).ok(), row.get(1).ok())),
+                |row| {
+                    Ok((
+                        session_display_title(row.get(0).ok(), row.get(1).ok()),
+                        row.get::<_, Option<i64>>(2).ok().flatten(),
+                    ))
+                },
             )
             .ok()
         };
-        if let Some(title) = title {
-            out.push(json!({ "uid": uid, "cid": cid, "title": title }));
+        if let Some((title, updated_at)) = row_data {
+            /* `updatedAt` 一起回给前端：`list_sessions` 只覆盖当前账号，其他账号的副本
+               时间列原来永远是「—」，看着像坏掉。 */
+            out.push(json!({
+                "uid": uid,
+                "cid": cid,
+                "title": title,
+                "updatedAt": updated_at,
+            }));
         }
     }
     json!(out)

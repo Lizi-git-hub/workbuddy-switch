@@ -267,6 +267,8 @@ export const zh = {
   "wbAccounts.dialog.switchedWarn": "已切换至「{name}」，但部分迁移未完成",
   "wbAccounts.dialog.switchedOk": "已切换至「{name}」",
   "wbAccounts.dialog.switchedDefault": "WorkBuddy 已重启为目标账号。",
+  "wbAccounts.dialog.planSummary": "执行时：新建 {copy} 个会话 · 同步 {sync} 个落后会话 · 跳过 {skip} 个（已一致）",
+  "wbAccounts.dialog.syncedSessions": "已同步 {n} 个落后会话（追加新增内容，未新建会话）",
   "wbAccounts.dialog.copiedSessions": "已复制 {n} 个会话",
   "wbAccounts.dialog.skippedSessions": "跳过 {n} 个已存在副本",
 
@@ -387,6 +389,7 @@ export const zh = {
   "wbAccounts.toast.checkinFail": "签到失败",
   "wbAccounts.toast.tokenRefreshFail": "Token 刷新失败",
   "wbAccounts.toast.tokenRefreshed": "Token 已刷新",
+  "wbAccounts.toast.tokenRefreshRetry": "Token 刷新暂时失败，请稍后重试",
   "wbAccounts.toast.needRelogin": "需重新登录",
   "wbAccounts.toast.checkinBatchSuccess": "{n} 个签到成功",
   "wbAccounts.toast.checkinBatchAlready": "{n} 个已签到",

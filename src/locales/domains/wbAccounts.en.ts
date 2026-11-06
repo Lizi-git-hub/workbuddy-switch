@@ -234,6 +234,8 @@ export const en = {
   "wbAccounts.dialog.switchedWarn": "Switched to \"{name}\", but some migration is incomplete",
   "wbAccounts.dialog.switchedOk": "Switched to \"{name}\"",
   "wbAccounts.dialog.switchedDefault": "WorkBuddy restarted as the target account.",
+  "wbAccounts.dialog.planSummary": "On confirm: create {copy}, sync {sync} behind, skip {skip} (already identical)",
+  "wbAccounts.dialog.syncedSessions": "Synced {n} behind session(s) by appending new content (no new sessions created)",
   "wbAccounts.dialog.copiedSessions": "Copied {n} sessions",
   "wbAccounts.dialog.skippedSessions": "Skipped {n} existing copies",
 
@@ -354,6 +356,7 @@ export const en = {
   "wbAccounts.toast.checkinFail": "Check-in failed",
   "wbAccounts.toast.tokenRefreshFail": "Token refresh failed",
   "wbAccounts.toast.tokenRefreshed": "Token refreshed",
+  "wbAccounts.toast.tokenRefreshRetry": "Token refresh failed temporarily, please retry later",
   "wbAccounts.toast.needRelogin": "Needs re-login",
   "wbAccounts.toast.checkinBatchSuccess": "{n} checked in",
   "wbAccounts.toast.checkinBatchAlready": "{n} already checked in",

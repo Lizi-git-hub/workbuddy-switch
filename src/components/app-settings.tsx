@@ -1,16 +1,23 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
+import { ArrowUpCircle, ExternalLink, Loader2, RefreshCw, Save } from "lucide-react";
 import { toast } from "sonner";
 
+import { DemoAction } from "@/components/demo-action";
 import { SettingsFieldRow, SettingsGroup } from "@/components/settings-primitives";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import { ScopeMark, scopeLabel } from "@/components/scope-chip";
 import * as api from "@/lib/api";
+import { useCreditRefreshPref } from "@/lib/credit-refresh-pref";
 import { isLocale, setLocale, useLocale, useT } from "@/lib/i18n";
+import { normalizeReleaseNotes } from "@/lib/release-notes";
 import { SCOPES, scopeOf, scopeParts, type Scope } from "@/lib/scope";
 import { planScopeShortcuts, SCOPE_SHORTCUT_LIMIT } from "@/lib/scope-shortcuts";
 import { useVisibleScopes } from "@/lib/scope-visibility";
@@ -23,8 +30,13 @@ import {
   THEME_PREFERENCES,
   type ThemePreference,
 } from "@/lib/theme";
+import { useAutoCheckUpdate } from "@/lib/update-preference";
+import type { GithubConfig, UpdateInfo } from "@/lib/types";
+import { GITHUB_OWNER, GITHUB_REPO, openReleaseUrl } from "@/lib/update";
 import { platformOfPath } from "@/lib/platforms/registry";
 import { useScope } from "@/lib/use-scope";
+import { cn } from "@/lib/utils";
+import { useAccountsStore } from "@/stores/accounts";
 
 /**
  * **应用级设置**的唯一实现：语言 / 外观（主题）/ 开机自启 / 自动更新。
@@ -52,6 +64,15 @@ import { useScope } from "@/lib/use-scope";
  * 正是本模块当初要消灭的那类不一致。判据仍是「有无产品耦合」：语言完全没有。
  */
 
+/**
+ * 版式变体 —— 同一份内容有两种出口（原型里也是两处渲染）：
+ *
+ * - `card`（默认）：设置页的 `<section class="card">`，标题在 `.card-head` 里。
+ * - `plain`：顶栏齿轮抽屉的 `.dsec`，标题是 11.5px muted 的 `h4`，行直接贴抽屉底色。
+ *
+ * ★ 用参数而不是复制一份组件：这五块**含取数**（`getGithubConfig` / `getLaunchAtLoginEnabled`），
+ * 复制一份就会长成两份会各自漂移的实现 —— 正是本模块当初要消灭的病。
+ */
 export type AppSettingsVariant = "card" | "plain";
 
 /**
@@ -66,9 +87,246 @@ function GroupBody({ variant, children }: { variant: AppSettingsVariant; childre
   return <CardContent className="space-y-0 p-0">{children}</CardContent>;
 }
 
-function UpdateCard(_props: { variant: AppSettingsVariant }) {
-  return null;
+/** 自动更新：检查公开 GitHub Releases 源 + 安装签名更新。 */
+function UpdateCard({ variant }: { variant: AppSettingsVariant }) {
+  const t = useT();
+  const version = useAccountsStore((s) => s.status?.version);
+  const [autoCheck, setAutoCheck] = useAutoCheckUpdate();
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
+  const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [githubConfig, setGithubConfig] = useState<GithubConfig>({});
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [proxySaving, setProxySaving] = useState(false);
+  /* 展示的更新源必须与**实际检查用的坐标**一致：后端配置优先，缺省才回落到内置常量。
+     以前这里写死前端常量，结果界面显示别人的仓库、背后却查自己的 —— 看着就像"没更新"。 */
+  const sourceOwner = githubConfig.owner?.trim() || GITHUB_OWNER;
+  const sourceRepo = githubConfig.repo?.trim() || GITHUB_REPO;
+  const sourceUrl = `https://github.com/${sourceOwner}/${sourceRepo}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getGithubConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setGithubConfig(config);
+        setProxyUrl(config.proxy ?? "");
+      })
+      .catch((e) => {
+        if (!cancelled) setMsg({ type: "err", text: api.asError(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function check() {
+    setChecking(true);
+    setMsg(null);
+    try {
+      const r = await api.checkUpdate(proxyUrl, true);
+      /* 版本说明跨了「外部资产 → 渲染」的边界，进 state 前先按白名单归一（同 AppFooter）。 */
+      setInfo({ ...r, notes: normalizeReleaseNotes(r.notes) });
+      if (!r.ok) {
+        setMsg({ type: "err", text: r.message || r.error || t("appSettings.update.checkFailed") });
+      }
+    } catch (e) {
+      setMsg({ type: "err", text: api.asError(e) });
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function saveProxy() {
+    const value = proxyUrl.trim();
+    if (value) {
+      try {
+        const parsed = new URL(value);
+        if (!parsed.hostname || !["http:", "https:"].includes(parsed.protocol)) {
+          throw new Error("unsupported proxy protocol");
+        }
+      } catch {
+        setMsg({ type: "err", text: t("appSettings.update.proxy.invalid") });
+        return;
+      }
+    }
+
+    setProxySaving(true);
+    setMsg(null);
+    try {
+      const saved = await api.saveGithubConfig({ ...githubConfig, proxy: value });
+      setGithubConfig(saved);
+      setProxyUrl(saved.proxy ?? "");
+      setMsg({
+        type: "ok",
+        text: value ? t("appSettings.update.proxy.saved") : t("appSettings.update.proxy.cleared"),
+      });
+    } catch (e) {
+      setMsg({ type: "err", text: api.asError(e) });
+    } finally {
+      setProxySaving(false);
+    }
+  }
+
+  /** 卡片形态下给「代理 / 更新源」这一组行铺一层 `--muted` 底，抽屉形态下不铺（原型 `.srow` 无底色）。 */
+  const tint = variant === "card" ? "bg-muted/25" : undefined;
+
+  return (
+    <SettingsGroup
+      id="settings-updates"
+      title={t("appSettings.update.title")}
+      variant={variant}
+    >
+      <GroupBody variant={variant}>
+        {/* ★ 自动检查更新：原型这一行的说明就是「每 30 分钟检查一次」
+            （`buddy-switch-prototype.html:4459`），间隔常量与轮询实现同源
+            （`lib/update-preference.ts` 的 `AUTO_CHECK_UPDATE_INTERVAL_MS` → `App.tsx` 的 AppFooter）。
+            ⚠️ 不加 `operational`：这是 localStorage 偏好，演示模式下**真的能用**，
+            遮起来反而变成假控件。 */}
+        <SettingsFieldRow
+          stacked={variant === "plain"}
+          label={t("appSettings.update.auto.label")}
+          description={t("appSettings.update.auto.description")}
+          htmlFor="update-auto-check"
+        >
+          <Switch
+            id="update-auto-check"
+            checked={autoCheck}
+            onCheckedChange={(value) => setAutoCheck(value)}
+            aria-label={t("appSettings.update.auto.label")}
+          />
+        </SettingsFieldRow>
+
+        <div className="border-b border-border px-4 py-3 text-sm">
+          {t("appSettings.update.current")}
+          <span className="font-mono">v{version || "?"}</span>
+        </div>
+
+        <div className={cn("flex min-w-0 items-center justify-between gap-3 border-b border-border px-4 py-3 text-sm", tint)}>
+          <div className="min-w-0 flex-1">
+            <div className="font-medium">{t("appSettings.update.source")}</div>
+            <div className="truncate text-xs text-muted-foreground">{sourceUrl}</div>
+          </div>
+          <DemoAction><Button
+            variant="ghost"
+            size="icon"
+            title={t("appSettings.update.openReleaseTitle")}
+            onClick={() => void openReleaseUrl(`${sourceUrl}/releases/latest`)}
+          >
+            <ExternalLink />
+          </Button></DemoAction>
+        </div>
+
+        <SettingsFieldRow
+          label={t("appSettings.update.proxy.label")}
+          description={t("appSettings.update.proxy.description")}
+          htmlFor="update-proxy"
+          className={tint}
+          operational
+          /* 抽屉形态（460px）必须纵向堆叠：`sm:` 是视口断点，在抽屉里会误判成够宽。 */
+          stacked={variant === "plain"}
+        >
+          <Input
+            id="update-proxy"
+            className={cn("w-full", variant === "card" && "sm:w-80")}
+            value={proxyUrl}
+            onChange={(event) => setProxyUrl(event.target.value)}
+            placeholder={t("appSettings.update.proxy.placeholder")}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </SettingsFieldRow>
+
+        <div className={cn("flex flex-wrap gap-2 border-b border-border px-4 py-3", tint)}>
+          <DemoAction><Button size="sm" variant="outline" onClick={() => void saveProxy()} disabled={proxySaving}>
+            {proxySaving ? <Loader2 className="animate-spin" /> : <Save />}
+            {t("appSettings.update.proxy.save")}
+          </Button></DemoAction>
+        </div>
+
+        <div className="flex flex-wrap gap-2 border-b border-border px-4 py-3">
+          <DemoAction><Button size="sm" variant="outline" onClick={check} disabled={checking}>
+            {checking ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("appSettings.update.check")}
+          </Button></DemoAction>
+        </div>
+
+        {info?.ok && (
+          <Alert variant="default" className={cn("!w-auto mx-4 my-4 sm:mx-5", info.hasUpdate && "border-primary/35 bg-primary/[0.06]")}>
+            {info.hasUpdate && <ArrowUpCircle className="text-primary" />}
+            <AlertDescription className="space-y-2">
+              <AlertTitle className={cn(info.hasUpdate && "text-primary")}>
+                {info.hasUpdate ? t("appSettings.update.foundTitle") : t("appSettings.update.doneTitle")}
+              </AlertTitle>
+              <div className="text-sm">
+                {info.hasUpdate
+                  ? t("appSettings.update.foundDetail", {
+                      latest: info.latest ?? "?",
+                      current: info.current ?? "?",
+                    })
+                  : t("appSettings.update.upToDate", { current: info.current ?? "?" })}
+                {info.releaseName && <span className="text-muted-foreground"> · {info.releaseName}</span>}
+              </div>
+              {info.hasUpdate && (
+                /* 入口文案从「立即升级」改成「查看更新内容」：点开的先是**说明**弹窗，
+                   下载要用户在里面再点一次（见 UPDATE-NOTES-ARCH.md）。 */
+                <DemoAction><Button size="sm" onClick={() => setInstallOpen(true)}>
+                  <ArrowUpCircle />
+                  {t("appSettings.update.viewNotes")}
+                </Button></DemoAction>
+              )}
+              {info.releaseUrl && (
+                <DemoAction><Button
+                  variant="link"
+                  size="sm"
+                  className="h-auto p-0"
+                  onClick={() => void openReleaseUrl(info.releaseUrl!)}
+                >
+                  {t("appSettings.update.openRelease")}
+                </Button></DemoAction>
+              )}
+            </AlertDescription>
+          </Alert>
+        )}
+        {msg && (
+          <Alert
+            variant={msg.type === "err" ? "destructive" : "default"}
+            className="!w-auto mx-4 my-4 sm:mx-5"
+          >
+            <AlertDescription>{msg.text}</AlertDescription>
+          </Alert>
+        )}
+        <UpdateInstallDialog
+          open={installOpen}
+          onOpenChange={setInstallOpen}
+          update={info}
+        />
+      </GroupBody>
+    </SettingsGroup>
+  );
 }
+
+/**
+ * 启动与托盘（仅桌面端渲染）—— 两行，都是「应用在窗口之外怎么活着」。
+ *
+ * - **开机时静默启动到托盘**：真值来自系统登录项（`tauri-plugin-autostart`）。
+ * - **关闭窗口时保持后台运行**：真值来自 `app_prefs.json`（`close_to_tray`）；
+ *   宿主在 `WindowEvent::CloseRequested` 里读它决定「隐藏还是退出」。
+ *
+ * ## 为什么两行同卡
+ *
+ * 原型把「开机自启」与「最小化到托盘」摆在同一列（`buddy-switch-prototype.html:4458-4460`），
+ * 两件事也确实成对：一个管「开机后进不进托盘」，一个管「关窗后留不留在托盘」。
+ * 拆成两张单行卡只会多一条分组标题。
+ *
+ * ## 两个开关的载体不同，是**刻意**的
+ *
+ * 开机自启的权威在**操作系统注册项**（应用不另存布尔值，否则会出现「系统已禁用但设置显示已开启」）；
+ * 关闭到托盘的权威在**本应用自己的偏好文件**（宿主需要读，见 `app_prefs.rs` 模块头）。
+ * 两者都用「写后回读、失败回滚」的同一种交互，但**不共用存储**。
+ */
 function StartupCard({ variant }: { variant: AppSettingsVariant }) {
   const t = useT();
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -304,6 +562,20 @@ function LanguageCard({ variant }: { variant: AppSettingsVariant }) {
   );
 }
 
+/**
+ * 键盘快捷键（P6 §3.1）：作用域快捷键「可关闭」开关。
+ *
+ * ## 为什么降级时**不显示开关**
+ *
+ * 快捷键在「作用域 > 9 个」时降级为不绑定（`planScopeShortcuts`）。此时**没有可开启之物**
+ * —— 再摆一个开关就是假控件（§1.7）。因此 `reason === "too-many"` 时改为一句说明，
+ * 与快捷键的真实绑定状态**同源**（都读 `planScopeShortcuts` 的结果）。
+ *
+ * ## 为什么这是**应用级**设置
+ *
+ * 数字快捷键作用于整个应用的全局键（不区分 WorkBuddy / Trae），与主题 / 语言同类，
+ * 因此放在共享的 `AppSettingsGroups` 里，两个产品分区走同一份实现。
+ */
 function ShortcutsCard({ variant }: { variant: AppSettingsVariant }) {
   const t = useT();
   const [enabled, setEnabled] = useShortcutsEnabled();
@@ -348,6 +620,30 @@ function ShortcutsCard({ variant }: { variant: AppSettingsVariant }) {
   );
 }
 
+/**
+ * 作用域可见性设置 —— **白名单**模型（存可见的作用域）。
+ *
+ * ## 为什么是应用级设置
+ *
+ * 作用域可见性是全局偏好，与语言 / 主题属于同一层级：它影响整个应用的导航入口，
+ * 而不是某个产品线的局部行为。
+ *
+ * ## 约束规则（★ 禁用判据必须**方向敏感**，issue #85）
+ *
+ * - 至少保留 1 个可见：**只有「已可见且是最后一个可见项」**才禁用（关了就空了）；
+ * - 当前作用域可见时不可隐藏 —— 它是顶栏选择器与全局键的锚点。
+ *
+ * ## ★★ 为什么禁用判据不能与方向无关（issue #85 真因）
+ *
+ * 旧实现是 `scope === currentScope || visibleScopes.length === 1` ——
+ * 后者**与勾选状态无关**：一旦可见集合降到 1 个，**6 个开关全部 disabled**，
+ * 于是「关掉的作用域再也打不开」，而 `setVisibleScopes` 又拒绝写空集合 ⇒
+ * UI 层与 store 层互相锁死，只能清 localStorage 才能恢复。
+ *
+ * 同理 `scope === currentScope` 也不能无条件禁用：当前作用域被隐藏时（URL 直达、
+ * 或在另一产品的设置页里关掉了它），那一行就是 `disabled + off`，**永远点不回来**。
+ * 现在只在「当前作用域**已可见**」时禁用 —— 隐藏态下它必须能点回来。
+ */
 function ScopeVisibilityCard() {
   const t = useT();
   const location = useLocation();
@@ -375,6 +671,11 @@ function ScopeVisibilityCard() {
         {SCOPES.map((scope) => {
           const { product: scopeProduct } = scopeParts(scope);
           const isVisible = visibleScopes.includes(scope);
+          // ★ 方向敏感（issue #85）：只在「关掉它会破坏约束」时禁用。
+          //   - 已可见且是最后一个可见项 ⇒ 不能再关（否则可见集合为空）；
+          //   - 当前作用域**已可见** ⇒ 不可隐藏（顶栏选择器 / 全局键的锚点）。
+          //   未勾选项**一律可点** —— 这正是旧实现缺的那一半，它让关到只剩 1 个之后
+          //   其余 5 个永远打不开。当前作用域若已被隐藏，也必须允许点回来。
           const disabled = isVisible && (visibleScopes.length === 1 || scope === currentScope);
 
           return (
@@ -410,6 +711,51 @@ function ScopeVisibilityCard() {
 }
 
 /**
+ * 积分自动刷新 —— **「打上游」默认关**（issue #133 复核 §3 / 方案 C）。
+ *
+ * ## 为什么要有这个开关
+ *
+ * 自动刷新此前是一刀切：`CREDIT_REFRESH_INTERVAL_MS` 同时管着「读本地快照」（零成本）与
+ * 「打上游」（真请求、可能被限流）。后者每 10 分钟替用户花一次上游成本，而用户从没要求过
+ * —— 与 `trae_checkin` / `qoder_checkin`（默认 `false`，理由写在 `default_schedule()`
+ * 注释里）是同一条判据：**替用户做动作要 opt-in**。
+ *
+ * 现在两类成本分开：本开关只管「打上游」那半边；只读本地快照的视图（Trae 两页）
+ * 不受影响，永远自动跟随。
+ *
+ * ⚠️ 默认关意味着升级后「余额不再自己动」。所以每个受影响的视图都必须有手动入口
+ * （WB 统计页「刷新积分」/ Qoder 积分页「重新查询」/ Qoder 账号卡「更多 → 刷新积分」），
+ * 且顶部文案要如实说「已关闭」——不能还写着「每 N 分钟自动刷新」。
+ */
+function CreditsAutoRefreshCard() {
+  const t = useT();
+  const upstreamAutoRefresh = useCreditRefreshPref((state) => state.upstreamAutoRefresh);
+  const setUpstreamAutoRefresh = useCreditRefreshPref((state) => state.setUpstreamAutoRefresh);
+
+  return (
+    <SettingsGroup id="settings-credit-auto-refresh" title={t("appSettings.creditAutoRefresh.groupTitle")}>
+      <CardContent className="space-y-0 p-0">
+        <SettingsFieldRow
+          label={t("appSettings.creditAutoRefresh.upstreamLabel")}
+          description={t("appSettings.creditAutoRefresh.upstreamDesc")}
+          htmlFor="credit-auto-upstream"
+          operational
+        >
+          <Switch
+            id="credit-auto-upstream"
+            checked={upstreamAutoRefresh}
+            onCheckedChange={setUpstreamAutoRefresh}
+          />
+        </SettingsFieldRow>
+        <p className="border-t border-border/60 px-4 py-3 text-xs text-muted-foreground">
+          {t("appSettings.creditAutoRefresh.hint")}
+        </p>
+      </CardContent>
+    </SettingsGroup>
+  );
+}
+
+/**
  * 五个应用级设置块，**门禁与原先设置页逐条对齐**。
  *
  * 门禁必须留在这里而不是交给调用方：本模块同时被设置页与顶栏 ⚙「应用设置」抽屉引用，
@@ -430,6 +776,7 @@ export function AppSettingsGroups({ variant = "card" }: { variant?: AppSettingsV
       {api.isDesktop() || api.isDemoMode() ? <StartupCard variant={variant} /> : null}
       {api.isWebui() && !api.isDemoMode() ? null : <UpdateCard variant={variant} />}
       <ScopeVisibilityCard />
+      <CreditsAutoRefreshCard />
     </>
   );
 }

@@ -1,3 +1,43 @@
+/**
+ * Qoder 账号页。
+ *
+ * ## 与原型的关系（`buddy-switch-prototype.html` 是唯一原型）
+ *
+ * 原型的账号页是**平台无关的工作台**：`viewAccounts()`（工具栏一行：搜索 / 排序 / 分组 /
+ * 视图切换 / 全选 / 添加账号）+ `accountCard()`（勾选 → 整卡可点开详情 → 页脚更多菜单）
+ * + `drawerAccount()`（详情抽屉：账号信息 / 备注编辑 / 操作区含删除）+ `batchBarHtml()`
+ * （批量条）。本页**逐件复用**了共享壳 —— `AccountWorkbench`（工具栏 / 批量条 / 空态 /
+ * 分桶 / 卡片栅格与表格切换）、`AccountDetailDrawer`、`AddAccountDrawer`、
+ * `RecycleBinSheet`、`ImportAccountsDialog`、`ExportAccountsDialog` —— 与
+ * `AccountsPage`（WB）/ `TraeAccountsPage` 是**同一条交互链**，差异只有数据。
+ *
+ * ## ★ 备注编辑在**抽屉**里（不在卡上）
+ *
+ * 与原型 `drawerAccount(id, editing)` 同构：卡片点开抽屉 → 抽屉里「编辑备注」→
+ * 就地输入 + 保存 / 取消。卡片**不再堆按钮**（原型 `acct-more` 的明说：
+ * 「操作都在账号抽屉里 —— 点账号卡打开抽屉即可操作」）。
+ *
+ * ## 与后端能力的对齐（缺的就不渲染，绝不摆假控件）
+ *
+ * 2026-10-15 本轮把三块「后端早就绪、前端没接线」的能力补齐，并新增两块：
+ *
+ * | 能力 | 落点 |
+ * |:--|:--|
+ * | **OAuth 设备授权** | 添加抽屉第一张卡 → `QoderOAuthDialog`（后端 PKCE S256 设备流） |
+ * | **回收站**（软删除） | 工具栏回收站按钮 → 共用 `RecycleBinSheet`；删除文案随之改 |
+ * | **导入 / 导出备份** | 添加抽屉「导入备份」卡 + 抽屉 / 批量条的「导出」 |
+ * | **签到 / 额度** | 卡片指标行（积分）+ 状态槽（今日已签 / 未签）+ 抽屉签到区与积分包 + 批量签到 |
+ *
+ * 仍**不渲染**的：程序位胶囊（Qoder 的「切换客户端登录态」尚未落地）、`expiresAt`
+ * （单位未取证 —— 按毫秒渲染会把秒值显示成 1970 = 谎报）。
+ *
+ * ## 两处刻意的加载策略
+ *
+ * 1. **账号列表与「额度 / 签到」分开加载**：前者是本地文件（快），后者要打上游（慢，且
+ *    可能失败）。串在一起会让「上游 401」变成「整页打不开」——而账号列表本来是可读的。
+ * 2. **额度 / 签到失败只影响那两块**：不弹错误条、不清空列表，卡片自然回落成
+ *    「没有积分指标 / 状态槽显示凭据可用」。**未知不伪装成已知**。
+ */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
@@ -56,7 +96,8 @@ import type {
   QoderProgramStatus,
 } from "@/lib/api";
 import { accountSearchText } from "@/lib/account-search";
-import { PACKS_TTL_MS, packSourceLabel, packState } from "@/lib/qoder-packs";
+import { packSourceLabel, packState } from "@/lib/qoder-packs";
+import { qoderPackKey, qoderPacksNotice, useQoderWebPacks } from "@/lib/use-qoder-web-packs";
 import {
   filterAccounts,
   groupAccounts,
@@ -68,6 +109,7 @@ import {
   type AccountViewMode,
 } from "@/lib/account-list-view";
 import { formatAbsoluteTime } from "@/lib/catalog-source";
+import { packRatio, toDetailPacks, type CreditPackTexts } from "@/lib/credit-packs";
 import { displayText } from "@/lib/display-text";
 import { formatCredits } from "@/components/account-card";
 import {
@@ -77,11 +119,14 @@ import {
   type AccountRefreshKind,
 } from "@/lib/account-refresh";
 import { useT } from "@/lib/i18n";
+import type { Translate } from "@/lib/i18n";
 import { platformDescriptor, platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf, type Scope } from "@/lib/scope";
 import { useScope } from "@/lib/use-scope";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
+import { CREDITS_UPSTREAM_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
+import { useCreditRefreshPref } from "@/lib/credit-refresh-pref";
 import { useRefreshAction } from "@/lib/use-refresh-action";
 
 /** ISO-8601 → 毫秒时间戳（解析不了给 `null` ⇒ 调用方**省掉那一行**，不显示 1970）。 */
@@ -90,6 +135,28 @@ const stampToMs = (iso: string | null | undefined): number | null => {
   const ts = Date.parse(iso);
   return Number.isNaN(ts) ? null : ts;
 };
+
+/**
+ * 资源包明细的**文案层**（Qoder 词条域）。
+ *
+ * 过滤 / 排序 / `ratio` 在 `credit-packs.ts`（四份实现合成一份）；这里只剩词条。
+ * ★「已用」这一句用**共用**词条 `shared.credit.packUsed`（issue #144 复核 §3.4）：
+ * 它不属于任何平台的词条域，此前这里写裸数字、WB / Trae 写「已用 N」—— 同一个抽屉里
+ * 同一列两种说法。包名与到期文案仍按 Qoder 域给（那两个确实带平台语义）。
+ */
+function QODER_PACK_TEXTS(t: Translate): CreditPackTexts {
+  return {
+    remainingText: (value) => String(value),
+    totalText: (value) => String(value),
+    usedText: (value) => t("shared.credit.packUsed", { n: String(value) }),
+    expiryText: (expireAtMs, expired) =>
+      expired
+        ? t("qoder.page.accounts.web.expired")
+        : expireAtMs !== null
+          ? formatAbsoluteTime(expireAtMs)
+          : t("qoder.page.accounts.web.neverExpires"),
+  };
+}
 
 /** 批量签到 / 批量刷新的失败项（`uid` 用于只重试失败项，`name` 用于展示）。 */
 interface FailedItem {
@@ -111,6 +178,7 @@ export default function QoderAccountsPage() {
 
   /* ── 额度 / 签到（**上游调用**，与账号列表分开加载；见文件头「加载策略」） ── */
   const [credits, setCredits] = useState<Record<string, QoderCreditsRow>>({});
+  /** 额度快照最后一次成功读到的时刻（issue #133，自动刷新判过期用；`0` = 还没读到）。 */
   const [creditsAt, setCreditsAt] = useState(0);
   const [checkinRows, setCheckinRows] = useState<Record<string, QoderCheckinRow>>({});
   /* 程序位状态（只读）：决定页脚程序位行、「当前登录」徽章与「切换到此账号」的可用性。 */
@@ -143,11 +211,29 @@ export default function QoderAccountsPage() {
    * 只在打开抽屉时查一次（单账号 1 个请求），不在列表首页批查（会翻 N 倍）。
    */
   const [proPack, setProPack] = useState<Record<string, api.QoderProPackStatus>>({});
-  const [webPacks, setWebPacks] = useState<Record<string, api.QoderWebCreditPacks>>({});
-  /** 正在取逐包的账号（浮层里显示「读取中」而不是「未登录」）。 */
-  const [packsLoading, setPacksLoading] = useState<Record<string, boolean>>({});
-  /** 每账号上次取数时刻（TTL 用 ref：改它不该触发重渲染）。 */
-  const packsFetchedAt = useRef<Record<string, number>>({});
+  /**
+   * 逐包明细（issue #111）：按 uid 缓存。
+   *
+   * ⚠️ 与 `credits` **并存、不互替**：`credits` 是 openapi 的聚合三标量（任何形态都有），
+   * 逐包要走网页会话（仅桌面端 + 需登录一次）。拿不到逐包时**回落聚合行**，
+   * 绝不显示空区块 —— 那是「不知道」伪装成「没有」。
+   *
+   * ★ 状态与五个动作（读 / 认领 / 退出 / 登录 / 缓存）都搬进 `useQoderWebPacks`：
+   * 聚合页的抽屉要的是**同一套**东西（issue #144 复核 §4.5），各写一份必然只有一半。
+   */
+  const qoderWebPacks = useQoderWebPacks(t);
+  /**
+   * 本页只有**一个**作用域 ⇒ 用一个小适配把「带作用域的键」收回到 `uid`。
+   * 控制器本身按 `scope` 存（聚合页跨 6 个作用域），这里不做二次缓存。
+   */
+  const packOf = useCallback(
+    (uid: string | undefined) => (uid ? qoderWebPacks.packs[qoderPackKey(scope, uid)] : undefined),
+    [qoderWebPacks.packs, scope],
+  );
+  const packsBusyOf = useCallback(
+    (uid: string | undefined) => !!uid && !!qoderWebPacks.loading[qoderPackKey(scope, uid)],
+    [qoderWebPacks.loading, scope],
+  );
   const [proBusy, setProBusy] = useState<string | null>(null);
   const [detailAutoEditRemark, setDetailAutoEditRemark] = useState(false);
   const [detailAutoEditGroup, setDetailAutoEditGroup] = useState(false);
@@ -227,11 +313,26 @@ export default function QoderAccountsPage() {
     void loadEnrichment();
   }, [hasAccounts, loadEnrichment]);
 
+  /**
+   * ★ 卡片上的额度自动重读（issue #133）。
+   *
+   * 空库时不发（`qoderCredits` 会逐账号打上游，没有账号就没有可刷的东西）。
+   * 失败时保留上一份快照（`loadEnrichment` 内部已 `allSettled`），不把「暂时取不到」显示成「没有额度」。
+   *
+   * ★ **默认关，opt-in**（issue #133 复核 §3）：同 Qoder 积分页 —— 逐账号打上游
+   * 不替用户决定。关掉后手动入口是卡片「更多 → 刷新积分」（那条现在真的会刷额度）。
+   */
+  const upstreamAutoRefresh = useCreditRefreshPref((state) => state.upstreamAutoRefresh);
   const refreshEnrichment = useCallback(() => {
     if (!hasAccounts) return;
     return loadEnrichment();
   }, [hasAccounts, loadEnrichment]);
-  useAutoRefreshWhenVisible(creditsAt, refreshEnrichment);
+  useAutoRefreshWhenVisible(
+    creditsAt,
+    refreshEnrichment,
+    CREDITS_UPSTREAM_REFRESH_INTERVAL_MS,
+    upstreamAutoRefresh,
+  );
 
   /** `/` 键聚焦搜索框（与另两平台同一条规则）；在输入框里打字时不劫持。 */
   useEffect(() => {
@@ -247,6 +348,10 @@ export default function QoderAccountsPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  /**
+   * P6：命令面板跳过来的 **`?q=` 一次性种子** —— 读一次播种页内搜索 state，
+   * 随后 `replace` 清参（视图参数留页内）。`seededRef` 保证只读一次。
+   */
   const [searchParams, setSearchParams] = useSearchParams();
   const seedAppliedRef = useRef(false);
   useEffect(() => {
@@ -364,6 +469,11 @@ export default function QoderAccountsPage() {
    */
   const [checkinMap, setCheckinMap] = useState<Record<string, CheckinStatusEntry>>({});
 
+  /** 今日签到三态（`null` = 未知，**不伪装成未签**）。
+   *
+   * ⚠️ `checkinMap`（用户点「刷新签到状态」后问上游拿到的真值）**优先**于列表快照：
+   * 否则那条入口点完卡片纹丝不动 —— 用户会以为没生效而反复点（issue #44 同款教训）。
+   */
   const checkinTodayOf = useCallback(
     (account: QoderAccountView): boolean | null => {
       const fresh = checkinMap[account.uid];
@@ -543,7 +653,17 @@ export default function QoderAccountsPage() {
     }
   }
 
+  /**
+   * 本平台真的能刷的项。
+   *
+   * issue #47 新增 `checkin`：Qoder 的签到读侧此前只有**整区域**快照
+   * （`qoder_checkin_status`），现在多了**逐账号**的只读重取
+   * （`qoder_checkin_status_map`）。仍然**没有** `tokens` —— Qoder 的计量单位是
+   * credits、没有 token 概念（见 `qoder::usage` 模块头），摆一个点了只能重读缓存的
+   * 菜单项比不摆更坏。
+   */
   const refreshPartBusy = useAccountRefreshBusy();
+
 
   /** 单项刷新（与卡片「更多」里的四项同源）。 */
   const onRefreshPart = useCallback(
@@ -552,8 +672,15 @@ export default function QoderAccountsPage() {
       await refreshPartBusy.run(account.uid, kind, async () => {
         try {
           if (kind === "credits") {
+            /* ⚠️ 两件事都要做（issue #133 复核 §5.1）：
+               ① `qoderRefreshAccount` 只是**换令牌**（device / job / PAT 三路由），它不查额度；
+               ② 额度在 `loadEnrichment()` 里（`qoderCredits`）。
+               此前只 `reload()`（重取账号列表 + 来源），于是这一项点完**卡片上的额度数字
+               不会变**，却弹一个「已刷新积分」的成功 toast —— 名不符实。
+               聚合页的同名菜单项之所以有效，是因为它后面还有 `reloadSignals()`。 */
             await api.qoderRefreshAccount(scope, account.uid);
             await reload();
+            await loadEnrichment();
           } else if (kind === "checkin") {
             /* 只问这一个账号（批量接口传 1 个 id 即可，不新增「单账号」变体）。 */
             const map = await api.qoderCheckinStatusMap(scope, [account.uid]);
@@ -567,9 +694,15 @@ export default function QoderAccountsPage() {
         }
       });
     },
-    [refreshPartBusy, scope, reload, t],
+    [refreshPartBusy, scope, reload, loadEnrichment, t],
   );
 
+  /**
+   * 刷新一条账号的令牌。
+   *
+   * ★ 走的是**同一份** `qoder_refresh_account`（网关页的「恢复」用的也是它）——
+   * 不另造一条「账号页专用刷新」。
+   */
   async function refreshOne(account: QoderAccountView) {
     try {
       await api.qoderRefreshAccount(scope, account.uid);
@@ -580,6 +713,20 @@ export default function QoderAccountsPage() {
     }
   }
 
+  /**
+   * 批量 / 单条签到。
+   *
+   * ⚠️ 后端只有**单账号** `qoder_checkin_claim` ⇒ 这里顺序逐条调，并**如实汇报成败**
+   * （批量操作必然可能部分失败，不能让「批量签到」看起来永远 100% 成功）。
+   * `baseOk` 用于「只重试失败项」时把上一轮的成果累计进去。
+   *
+   * ★ **三档**（issue #46 的 D 项，2026-10-18）：
+   * ① 成功（含 `already` 今日已签 —— 那有 `today_checked_in` 作依据）；
+   * ② **通道未开放**（`disabled`）—— 既不是成功、也**不进失败桶**：
+   *    legacy 签到端点对**任何** campaignKey 都回 409（含编造的），上游已关停，
+   *    「重试失败项」对它永远无效，混进失败只会教用户做没用的操作；
+   * ③ 失败（真失败，可重试）。
+   */
   async function runCheckin(targets: QoderAccountView[], baseOk = 0, baseEarned = 0) {
     if (targets.length === 0 || busy) return;
     setBusy(true);
@@ -629,114 +776,6 @@ export default function QoderAccountsPage() {
     await loadEnrichment();
   }
 
-  async function loadPacks(uid: string, force = false) {
-    if (!uid) return;
-    if (packsLoading[uid]) return;
-    const last = packsFetchedAt.current[uid] ?? 0;
-    if (!force && webPacks[uid] && Date.now() - last < PACKS_TTL_MS) return;
-    setPacksLoading((prev) => ({ ...prev, [uid]: true }));
-    try {
-      const result = await api.qoderWebCreditPacks(scope, uid);
-      packsFetchedAt.current[uid] = Date.now();
-      setWebPacks((prev) => ({ ...prev, [uid]: result }));
-    } catch {
-      /* 静默：详情拿不到不是错误，浮层会按 `packs` 为空给出引导。 */
-    } finally {
-      setPacksLoading((prev) => {
-        const next = { ...prev };
-        delete next[uid];
-        return next;
-      });
-    }
-  }
-
-  async function probeAndLoad(account: QoderAccountView): Promise<boolean> {
-    const uid = account.uid;
-    setPacksLoading((prev) => ({ ...prev, [uid]: true }));
-    try {
-      const probe = await api.qoderWebCreditPacksProbe(scope, uid);
-      if (!probe.hasSession) return false;
-      if (probe.uidMatches === false) {
-        // 归属不符：后端已丢弃该会话，界面必须说清楚「不是这个账号」，不能当成没登录。
-        toast.error(t("qoder.page.accounts.web.readMismatch"));
-        await loadPacks(uid, true);
-        return false;
-      }
-      await loadPacks(uid, true);
-      toast.success(t("qoder.page.accounts.web.readDone", { n: String(probe.packs?.length ?? 0) }));
-      return true;
-    } catch {
-      /* 上游拒绝 / 网络失败：让浮层与抽屉按结构化原因给下一步，这里不重复报错。 */
-      await loadPacks(uid, true);
-      return false;
-    } finally {
-      setPacksLoading((prev) => {
-        const next = { ...prev };
-        delete next[uid];
-        return next;
-      });
-    }
-  }
-
-  /**
-   * 「我已登录，读取逐包明细」（#111 复核 P0-2）。
-   *
-   * 为什么必须有这个显式入口：登录是在**另一个窗口**里完成的，用户很自然会「登录完直接
-   * 关窗」。自动轮询能覆盖大部分情况，但关窗那一刻的时序不保证；给一个用户能自己按的
-   * 按钮，比让用户猜「是不是还要再等」强。
-   */
-  async function readPacks(account: QoderAccountView) {
-    const ok = await probeAndLoad(account);
-    if (!ok) toast.error(t("qoder.page.accounts.web.readFailed"));
-  }
-
-  async function logoutWebSession() {
-    try {
-      await api.qoderWebSessionLogout(scope);
-      setWebPacks({});
-      packsFetchedAt.current = {};
-      toast.success(t("qoder.page.accounts.web.logoutDone"));
-      const uid = detail?.uid;
-      if (uid) await loadPacks(uid, true);
-    } catch (e) {
-      toast.error(api.asError(e));
-    }
-  }
-
-  async function openWebLogin(account: QoderAccountView) {
-    try {
-      await api.qoderWebLoginOpen(scope);
-      toast.success(t("qoder.page.accounts.web.loginToast"));
-    } catch (e) {
-      toast.error(api.asError(e));
-      return;
-    }
-    /* 基线指纹：开窗那一刻的 cookie 集合。之后「与它不同」= 登录态变了。 */
-    const baseline = await api.qoderWebWindowCookies(scope).catch(() => null);
-    let seen = baseline?.fingerprint ?? "";
-    let probes = 0;
-    /* 最多等 2 分钟（60 × 2s）：再长说明用户没打算现在登录，没必要一直转。 */
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      const current = await api.qoderWebWindowCookies(scope).catch(() => null);
-      if (!current) continue; // 单次失败不终止（窗口可能正处在导航中）
-      if (!current.windowOpen) {
-        /* 窗口被关了 —— 「登录完直接关窗」是最常见的操作序列。
-           关窗前后端已兜底收割（`install_close_harvest`），此时 `pending` 为真才值得
-           探一次；否则说明用户根本没登录，别白发一次注定 401 的请求。 */
-        const status = await api.qoderWebSessionStatus(scope, account.uid).catch(() => null);
-        if (status?.pending) await probeAndLoad(account);
-        return;
-      }
-      if (!current.fingerprint || current.fingerprint === seen) continue;
-      seen = current.fingerprint;
-      probes += 1;
-      if (await probeAndLoad(account)) return;
-      /* 指纹变了但没认领成功（未登录的匿名 cookie / 别人的会话）：最多试 3 次，
-         避免用户在这个窗口里反复登录时把上游打成筛子。 */
-      if (probes >= 3) return;
-    }
-  }
 
   function openDetail(account: QoderAccountView) {
     setDetailAutoEditRemark(false);
@@ -842,6 +881,15 @@ export default function QoderAccountsPage() {
     return rowsOut;
   }, [detail, t]);
 
+  /**
+   * 抽屉的积分包：**有逐包就用逐包，没有就回落聚合行**（issue #111）。
+   *
+   * 逐包来自网页会话（`qoderWebCreditPacks`），需要桌面端 + 登录过一次；
+   * 拿不到时显示 openapi 的聚合三标量 —— 那在任何形态都拿得到，不是空区块。
+   * 聚合行的 `expiryText` 仍给 `—`：`quota/usage` 的 `expiresAt` 是套餐级、不是包级，
+   * 按它渲染「到期」会张冠李戴。
+   */
+  /** 分组候选（本作用域已用过的组名）—— 抽屉里的分组选择器用，见 WB 页同名变量。 */
   const detailGroups = useMemo(() => {
     const names = new Set<string>();
     for (const account of accounts ?? []) {
@@ -877,6 +925,9 @@ export default function QoderAccountsPage() {
       {
         key: "checkin",
         label: t("shared.stat.checkin"),
+        // 三档必须分开（issue #47）：被刷新过的账号按上游读数渲染；读失败显示「读不到」
+        // 而不是「未签到」；上游说活动未开放则显示「本区域未开放」。
+        // 没刷新过的退回区域快照口径，并如实标明来源是本地台账。
         valueText: (() => {
           const entry = detail ? checkinMap[detail.uid] : undefined;
           if (entry && !entry.ok) return t("shared.stat.checkinUnreadable");
@@ -912,44 +963,51 @@ export default function QoderAccountsPage() {
     ];
   }, [detail, credits, checkinTodayOf, checkinMap, t]);
 
+  /**
+   * 资源包明细（issue #144 复核 · L1/L2）。
+   *
+   * ① 逐包：过滤 / 排序 / `ratio` 走 `credit-packs.ts`；
+   * ② 回落聚合行：**不**过过滤（它不是「一个包」，而是这个账号的余额总量，
+   *    `0 / 100` 本身就是「用完了」这条信息，剔掉会变成「没有积分区块」）。
+   *
+   * ★ 过滤口径与聚合页对齐：`remaining > 0` 且 `limit > 0`。此前渠道页一个都不过滤，
+   * 聚合页却过滤 ⇒ 「已用完的包要不要列」在同一个平台上有了两个相反答案（#144 §3.2）。
+   */
   const detailPacks = useMemo<DetailPack[]>(() => {
     if (!detail) return [];
-    const web = webPacks[detail.uid];
+    const web = packOf(detail.uid);
 
     // ① 有逐包 ⇒ 逐条渲染（这才回答了「我有几个包、各剩多少、何时到期」）。
     if (web?.available && web.packs.length > 0) {
       const now = Date.now();
       const seen = new Map<string, number>();
-      return web.packs.map((pack, index) => {
-        const source = packSourceLabel(t, pack.source);
-        const ordinal = (seen.get(source) ?? 0) + 1;
-        seen.set(source, ordinal);
-        const state = packState(pack, now);
-        const expired = state === "expired";
-        const expiringSoon = state === "expiring";
-        const ratio =
-          pack.limit > 0
-            ? Math.min(100, Math.max(0, (pack.remaining / pack.limit) * 100))
-            : 0;
-        return {
-          key: pack.id ?? `${pack.group}-${index}`,
-          name: t("qoder.page.accounts.web.packName", {
-            source,
-            n: String(ordinal),
-          }),
-          remainingText: String(pack.remaining),
-          totalText: String(pack.limit),
-          usedText: String(pack.used),
-          expiryText: expired
-            ? t("qoder.page.accounts.web.expired")
-            : pack.expiresAtMs !== undefined
-              ? formatAbsoluteTime(pack.expiresAtMs)
-              : t("qoder.page.accounts.web.neverExpires"),
-          expired,
-          expiringSoon,
-          ratio,
-        };
-      });
+      return toDetailPacks(
+        web.packs.map((pack, index) => {
+          const source = packSourceLabel(t, pack.source);
+          const ordinal = (seen.get(source) ?? 0) + 1;
+          seen.set(source, ordinal);
+          const state = packState(pack, now);
+          return {
+            key: pack.id ?? `${pack.group}-${index}`,
+            name: t("qoder.page.accounts.web.packName", {
+              source,
+              n: String(ordinal),
+            }),
+            total: pack.limit,
+            remaining: pack.remaining,
+            used: pack.used,
+            /* Qoder 的 `expiresAtMs` 本来就是毫秒（`api.ts` 的字段名已带 `Ms`）。 */
+            expireAtMs: pack.expiresAtMs ?? null,
+            expired: state === "expired",
+            /* Qoder 上游**没有**临期标记 ⇒ 用 `packState` 算，窗口取 `qoder-packs.ts`
+               的 `EXPIRING_SOON_MS`（14 天，与卡片浮层同源）。这里是「平台适配层」，
+               纯函数不猜窗口。 */
+            expiringSoon: state === "expiring",
+          };
+        }),
+        QODER_PACK_TEXTS(t),
+        now,
+      );
     }
 
     // ② 没有逐包 ⇒ **回落聚合行**（不是空区块；聚合三标量在任意形态都拿得到）。
@@ -968,39 +1026,25 @@ export default function QoderAccountsPage() {
         expiryText: "—",
         expired: false,
         expiringSoon: false,
-        ratio: total > 0 ? Math.min(100, Math.max(0, (remaining / total) * 100)) : 0,
+        ratio: packRatio(remaining, total),
       },
     ];
-  }, [detail, credits, t, webPacks]);
+  }, [detail, credits, packOf, t]);
 
-  const detailPacksNotice = useMemo(() => {
-    if (!detail) return null;
-    const web = webPacks[detail.uid];
-    if (web?.available) {
-      return {
-        text: t("qoder.page.accounts.web.packsNoticeReady", { n: String(web.packs.length) }),
-        actionLabel: t("qoder.page.accounts.web.logout"),
-        onAction: () => void logoutWebSession(),
-        busy: false,
-      };
-    }
-    if (api.isWebui()) return null;
-    return {
-      text: t("qoder.page.accounts.web.packsNotice"),
-      actionLabel: t("qoder.page.accounts.web.read"),
-      onAction: () => void readPacks(detail),
-      busy: !!packsLoading[detail.uid],
-    };
-    // `logoutWebSession` / `readPacks` 每次渲染都是新函数，进依赖会让 memo 恒失效；
-    // 两者只读当前闭包里的 scope / detail，随 `detail` / `webPacks` 一起变即可。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail, webPacks, packsLoading, t]);
+  /**
+   * 抽屉里积分包区块下方的说明与动作（#111 复核 §2.6 / 验收 #16）。
+   *
+   * ★ 三态判定与两个动作都在 `qoderPacksNotice` 里（`lib/use-qoder-web-packs.ts`）——
+   * 聚合页的抽屉要的是**同一份**（issue #144 复核 §4.5：此前只有本页注入，聚合页的
+   * 用户只看到空白区块，既不知道「登录一次就能看」，也没有按钮）。
+   */
+  const detailPacksNotice = qoderPacksNotice(t, qoderWebPacks, scope, detail?.uid);
 
   /** 打开抽屉时取一次逐包（TTL 内不重复请求）。 */
   useEffect(() => {
     const uid = detail?.uid;
-    if (uid) void loadPacks(uid);
-    // `loadPacks` 是纯读取 + setState，不依赖其它 props；只按 uid 变化触发。
+    if (uid) void qoderWebPacks.load(scope, uid);
+    // `load` 是纯读取 + setState，不依赖其它 props；只按 uid 变化触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.uid]);
 
@@ -1065,6 +1109,10 @@ export default function QoderAccountsPage() {
     };
   }, [detail, proPack, proBusy, t, claimProPack]);
 
+  /**
+   * 抽屉的签到区 —— 状态**明确可读**时给数值；读不到 / 无机器身份 / 本区域没活动时
+   * 给一条**原因说明**（issue #66：从前这些情况整个 tab 直接消失，用户只看到「读不到」）。
+   */
   const detailCheckin = useMemo(() => {
     if (!detail) return null;
     const row = checkinRows[detail.uid];
@@ -1230,10 +1278,12 @@ export default function QoderAccountsPage() {
           onToggleAll: toggleVisibleSelection,
           label: allVisibleSelected ? t("shared.toolbar.deselectAll") : t("shared.toolbar.selectAll"),
         }}
+        /* ★ 主操作 = 原型工具栏最右侧的 `+ 添加账号`（打开添加抽屉，方式卡由页面注入）。 */
         addAction={{
           label: t("shared.addDrawer.title"),
           onClick: () => setAddDrawerOpen(true),
         }}
+        /* ★ 回收站入口（软删除的唯一恢复路径；后端已是软删除，没有入口 = 假承诺）。 */
         onOpenRecycleBin={() => setRecycleOpen(true)}
         loading={accounts === null}
         emptyState={emptyState}
@@ -1349,6 +1399,8 @@ export default function QoderAccountsPage() {
         }
         rowSelectLabel={(account) => t("shared.table.selectRowAria", { name: qoderAccountName(account) })}
         rowOpenLabel={(account) => t("shared.table.openRowAria", { name: qoderAccountName(account) })}
+        /* ★ 表格视图的「更多」：与卡片**同一个菜单组件**（WB 的 `renderActions` 同形）。
+           此前 Qoder 表格没有任何行尾动作 ⇒ 表格里除了点行就没有别的出口。 */
         renderActions={(account) => (
           <QoderAccountMenu
             compact
@@ -1363,7 +1415,7 @@ export default function QoderAccountsPage() {
               setExportTargets([target]);
               setExportOpen(true);
             }}
-            onWebLogin={(target) => void openWebLogin(target)}
+            onWebLogin={(target) => void qoderWebPacks.login(scope, target.uid)}
             onDelete={setPendingDelete}
             onRefreshPart={(kind) => onRefreshPart(account, kind)}
             refreshingKinds={refreshPartBusy.kindsOf(account.uid)}
@@ -1393,11 +1445,11 @@ export default function QoderAccountsPage() {
                 setExportTargets([account]);
                 setExportOpen(true);
               }}
-              onWebLogin={(target) => void openWebLogin(target)}
-              onReadPacks={(target) => void readPacks(target)}
-              packs={webPacks[account.uid]}
-              packsLoading={!!packsLoading[account.uid]}
-              onRequestPacks={(target) => void loadPacks(target.uid)}
+              onWebLogin={(target) => void qoderWebPacks.login(scope, target.uid)}
+              onReadPacks={(target) => void qoderWebPacks.read(scope, target.uid)}
+              packs={packOf(account.uid)}
+              packsLoading={packsBusyOf(account.uid)}
+              onRequestPacks={(target) => void qoderWebPacks.load(scope, target.uid)}
               credits={
                 row && row.ok
                   ? { remaining: row.remaining ?? 0, total: row.total ?? 0, plan: row.plan ?? null }
@@ -1431,8 +1483,11 @@ export default function QoderAccountsPage() {
         onOpenChange={setAddDrawerOpen}
         scopeLabel={scopeLabel(t, scope)}
         installed={localInstalled}
+        /* 基础三张卡**全部已落地**：OAuth 设备授权（本轮新增）/ 从本机导入 / 导入备份。
+           粘贴 PAT 走 extraOptions（它不属于原型的三种「添加方式」）。 */
         ways={["oauth", "local", "backup"]}
         onPick={(way) => {
+          /* 本机没有 Qoder 来源时，「从本机导入」没有目录可读 —— 给替代路径（issue #62）。 */
           if (way === "local" && !localInstalled) {
             toast.error(t("shared.srv.localUnavailable"), {
               description: t("shared.srv.localUnavailableDesc"),

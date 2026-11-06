@@ -1,6 +1,6 @@
 [package]
 name = "buddy-switch-rust"
-version = "20261101.0.0"
+version = "20261106.1.0"
 description = "BuddySwitch —— WorkBuddy 账号切换工具（Rust/Tauri 版）"
 authors = []
 edition = "2021"

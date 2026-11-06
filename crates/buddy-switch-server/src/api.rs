@@ -2287,6 +2287,12 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
         *SWITCH_PROGRESS.lock().unwrap() = Some(msg.to_string());
     });
 
+    let sync_items = body
+        .get("syncSessionItems")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
     let result = tokio::task::spawn_blocking(move || {
         switch::switch_account_cross(
             region,
@@ -2295,6 +2301,7 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
             &account_id,
             restart,
             &copy_ids,
+            &sync_items,
         )
     })
     .await;

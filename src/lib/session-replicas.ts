@@ -152,15 +152,29 @@ export function buildGroupViews(
   accountLabels: Map<string, string>,
 ): SessionGroupView[] {
   return groups.map((group) => {
+    /* 标题 / 时间**优先用后端 `group.titles`**：它直读 `sessions` 表、按 `(uid, cid)` 取，
+       跨账号都能读到。`sessionsByAccount` 来自 `list_sessions`，那条命令只回**当前账号**
+       的行 —— 之前拿它当唯一来源，其他账号的副本就全成了「标题未知」。 */
+    const titles = buildTitleMap(group.titles);
+    const metaByCid = new Map((group.titles ?? []).map((item) => [item.cid, item]));
     const rows: SessionReplicaRow[] = group.replicas.map((replica) => {
       const session = findSession(sessionsByAccount, replica.accountUid, replica.sessionId);
+      const meta = metaByCid.get(replica.sessionId);
       return {
         accountUid: replica.accountUid,
         accountLabel: resolveAccountLabel(replica.accountUid, accountLabels),
         sessionId: replica.sessionId,
-        title: displayText(session?.title) ?? t("sessions.replica.titleFallback"),
-        updatedAt: typeof session?.updatedAt === "number" ? session.updatedAt : null,
-        hasHistory: session?.hasHistory === true,
+        title:
+          titles.get(replica.sessionId) ??
+          displayText(session?.title) ??
+          t("sessions.replica.titleFallback"),
+        updatedAt:
+          typeof meta?.updatedAt === "number"
+            ? meta.updatedAt
+            : typeof session?.updatedAt === "number"
+              ? session.updatedAt
+              : null,
+        hasHistory: replica.hasHistory === true || session?.hasHistory === true,
       };
     });
     return {
@@ -173,7 +187,7 @@ export function buildGroupViews(
           ? { createdAt: group.baseline.createdAt, lineCount: group.baseline.lineCount }
           : null,
       ...contentOf(group.content),
-      titles: buildTitleMap(group.titles),
+      titles,
     };
   });
 }
@@ -346,7 +360,10 @@ export function lostLinesFor(group: SessionGroupView, sessionId: string): number
  * 1. 这个会话从来没复制过（不在任何副本组里）；
  * 2. 目标账号里没有它的副本；
  * 3. 源比目标**新**（相对共同旧版的新增条数更多）；
- * 4. 两边标题不一致，或目标那份的正文不在本机（`hasHistory === false`）。
+ * 4. 两边标题不一致，或内容状态取不到指纹（`unknown`）。
+ *
+ * ⚠️ **不用 `hasHistory` 判目标正文缺失**：该字段只对当前登录账号有效
+ * （`list_sessions` 只回当前账号的行），拿它判会把每个已同步会话都算成「需要」。
  *
  * ⚠️ 内容状态为 `unknown`（指纹取不到）时不臆断 —— 直接当作「需要处理」，
  * 宁可让用户多看一眼，也不要替他把真实差异藏起来。
@@ -364,7 +381,14 @@ export function sessionNeedsCopy(
   if (!group) return true;
   const target = group.rows.find((row) => row.accountUid === targetUid);
   if (!target) return true;
-  if (target.hasHistory === false) return true;
+
+  /* ⚠️ **不要用 `target.hasHistory` 判「目标没有正文」**。
+     这个字段来自 `list_sessions`，而那条命令只返回**当前登录账号**的会话行 ⇒
+     其他账号的副本一律 `hasHistory = false`（UI 上表现为「标题未知」）。
+     拿它做判据，等于把「我们查不到」当成「目标确实没有」—— 于是每个已同步的会话
+     都被判成「需要处理」，弹窗里排满一整列（现场：12 个组里 10 个已一致，仍然全列）。
+     正文是否齐，由 `group.status` 承担：`unknown` 表示有副本取不到指纹（正文缺失或读失败），
+     那才真的需要处理；`latest` / `behind` 说明所有成员的指纹都读到了。 */
 
   /* 内容：未知一律按「需要处理」；已知则比较相对共同旧版的增量。 */
   if (group.status === "unknown") return true;
@@ -382,4 +406,66 @@ export function sessionNeedsCopy(
   const targetTitle = group.titles.get(target.sessionId);
   if (sourceTitle && targetTitle && sourceTitle !== targetTitle) return true;
   return false;
+}
+
+/** 切号时每个会话该走的动作（`copy` = 新建副本，`sync` = 往已有副本追加）。 */
+export interface SwitchSessionPlan {
+  /** 目标账号还没有副本的会话 —— 走「复制」（生成新 id）。 */
+  copyIds: string[];
+  /** 目标已有副本但内容落后的会话 —— 走「同步」（追加新增行，不新建会话）。 */
+  syncItems: { sourceCid: string; targetCid: string }[];
+  /** 目标已一致、无需动作的会话。 */
+  skipped: string[];
+}
+
+/**
+ * 把「勾选的会话」拆成 copy / sync / skip 三组。
+ *
+ * ## 为什么必须拆
+ *
+ * 切号弹窗里勾的会话，目标账号可能**早就有一份**（只是落后）。旧的执行路径一律走复制，
+ * 而复制对「账本里已存在」的会话会直接跳过（`deduplicated: true`）—— 于是用户点了
+ * 「下一步」，界面上什么也没发生：既没新建、也没同步。过滤修好之后（只剩落后的会话）
+ * 这个缺口会 100% 暴露，所以这里显式分流。
+ *
+ * 判定与 [`sessionNeedsCopy`] 同源：内容状态未知一律按「需要」处理（走同步更安全，
+ * 追加不会破坏已有内容）。
+ */
+export function planSwitchSessions(
+  sessionIds: Iterable<string>,
+  sessions: Session[],
+  sourceUid: string,
+  targetUid: string,
+  groups: SessionGroupView[],
+): SwitchSessionPlan {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const plan: SwitchSessionPlan = { copyIds: [], syncItems: [], skipped: [] };
+  for (const id of sessionIds) {
+    const session = byId.get(id);
+    if (!session) continue;
+    const group =
+      groups.find((item) =>
+        item.rows.some((row) => row.sessionId === id && row.accountUid === sourceUid),
+      ) ?? groups.find((item) => item.rows.some((row) => row.sessionId === id));
+    if (!group) {
+      plan.copyIds.push(id);
+      continue;
+    }
+    const target = group.rows.find((row) => row.accountUid === targetUid);
+    if (!target) {
+      plan.copyIds.push(id);
+      continue;
+    }
+    const sourceDelta = group.deltas.get(id);
+    const targetDelta = group.deltas.get(target.sessionId);
+    const behind =
+      group.status === "unknown" ||
+      (sourceDelta !== undefined && targetDelta !== undefined && sourceDelta > targetDelta);
+    if (behind) {
+      plan.syncItems.push({ sourceCid: id, targetCid: target.sessionId });
+    } else {
+      plan.skipped.push(id);
+    }
+  }
+  return plan;
 }

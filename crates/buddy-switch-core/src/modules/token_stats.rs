@@ -7,7 +7,7 @@
 //! CodeBuddy IDE 不写 JSONL，用量在 `CodeBuddyExtension/Data/**/history/**/index.json`
 //! 的 `requests[].usage` 中；消息正文文件（`messages/`）不会被扫描。
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Local, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -2027,6 +2027,7 @@ pub fn get_statistics_for_filter_forced(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
     use std::fs;
 
     #[test]
@@ -3114,7 +3115,7 @@ mod tests {
         };
         let (t1, t2, t3) = (at(12), at(13), at(14));
         let day_key = today.format("%Y-%m-%d").to_string();
-        let weekday = today.weekday().num_days_from_monday();
+        let _weekday = today.weekday().num_days_from_monday();
 
         let root = std::env::temp_dir().join(format!(
             "buddy-switch-token-stats-multi-{}-{}",
